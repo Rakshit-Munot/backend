@@ -87,3 +87,4 @@ tzdata==2025.2
 urllib3==2.3.0
 ushlex==0.99.1
 websocket-client==1.8.0
+whitenoise==6.9.0
