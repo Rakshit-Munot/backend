@@ -141,7 +141,7 @@ SECRET_KEY = config('SECRET_KEY')  # Load from environment
 DEBUG = config('DEBUG', default=False, cast=bool)
 
 # Allow hosts from environment (comma-separated)
-ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost").split(" ")
+ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS").split(" ")
 
 
 # HTTPS / HSTS settings (enable in production)
