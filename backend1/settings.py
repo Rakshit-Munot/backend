@@ -141,7 +141,8 @@ SECRET_KEY = config('SECRET_KEY')  # Load from environment
 DEBUG = config('DEBUG', default=False, cast=bool)
 
 # Allow hosts from environment (comma-separated)
-ALLOWED_HOSTS = ["backend-4-x6ud.onrender.com"]
+ALLOWED_HOSTS = ['127.0.0.1', 'localhost', 'backend-4-x6ud.onrender.com']
+
 
 
 
