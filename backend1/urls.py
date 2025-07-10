@@ -15,19 +15,29 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path,include
-from api.api import api
-from intruments.api import api as instruments
+from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-import debug_toolbar
+from django.http import JsonResponse
+
+# API routers
+from api.api import api
+from intruments.api import api as instruments
+
+# Health check view
+def health_check(request):
+    return JsonResponse({"status": "ok"})
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', api.urls),
-    path('instruments/',instruments.urls),
+    path('instruments/', instruments.urls),
+    path('health/', health_check),
 ]
+
+# Only add debug toolbar & static media in development
 if settings.DEBUG:
+    import debug_toolbar
     urlpatterns += [
         path('__debug__/', include(debug_toolbar.urls)),
     ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
