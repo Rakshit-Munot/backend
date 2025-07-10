@@ -237,14 +237,14 @@ DATABASES = {
 # -----------------------------------------------------------------------------
 # CHANNELS (Redis)
 # -----------------------------------------------------------------------------
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        'CONFIG': {
-            'hosts': [config('REDIS_URL')],
-        },
-    },
-}
+# CHANNEL_LAYERS = {
+#     'default': {
+#         'BACKEND': 'channels_redis.core.RedisChannelLayer',
+#         'CONFIG': {
+#             'hosts': [config('REDIS_URL')],
+#         },
+#     },
+# }
 
 # -----------------------------------------------------------------------------
 # AUTH
