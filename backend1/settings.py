@@ -228,6 +228,8 @@ ASGI_APPLICATION = 'backend1.asgi.application'
 # -----------------------------------------------------------------------------
 # DATABASES (Supabase Postgres)
 # -----------------------------------------------------------------------------
+print("DB SETTINGS >>>", os.getenv("DB_NAME"), os.getenv("DB_USER"), os.getenv("DB_PASSWORD"), os.getenv("DB_HOST"))
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
