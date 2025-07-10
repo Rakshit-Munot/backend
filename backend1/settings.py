@@ -228,16 +228,16 @@ ASGI_APPLICATION = 'backend1.asgi.application'
 # -----------------------------------------------------------------------------
 # DATABASES (Supabase Postgres)
 # -----------------------------------------------------------------------------
-print("DB SETTINGS >>>", os.getenv("DB_NAME"), os.getenv("DB_USER"), os.getenv("DB_PASSWORD"), os.getenv("DB_HOST"))
+print("DB SETTINGS >>>", config("DB_NAME"), config("DB_USER"), config("DB_PASSWORD"), config("DB_HOST"))
 
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME'),
-        'USER': os.getenv('DB_USER'),
-        'PASSWORD': os.getenv('DB_PASSWORD'),
-        'HOST': os.getenv('DB_HOST'),
-        'PORT': os.getenv('DB_PORT', '5432'),
+        'NAME': config('DB_NAME'),
+        'USER': config('DB_USER'),
+        'PASSWORD': config('DB_PASSWORD'),
+        'HOST': config('DB_HOST'),
+        'PORT': config('DB_PORT', default='5432'),
         'CONN_MAX_AGE': 600,
     }
 }
