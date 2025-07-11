@@ -157,8 +157,10 @@ ALLOWED_HOSTS = ['127.0.0.1', 'localhost', 'backend-4-x6ud.onrender.com']
 # -----------------------------------------------------------------------------
 # APPLICATIONS
 # -----------------------------------------------------------------------------
+CSRF_TRUSTED_ORIGINS = [
+    "https://frontend1-lake.vercel.app"
+]
 
-CSRF_TRUSTED_ORIGINS = ["https://backend-4-x6ud.onrender.com"]
 
 INSTALLED_APPS = [
     # Django
@@ -288,7 +290,11 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # -----------------------------------------------------------------------------
 # CORS
 # -----------------------------------------------------------------------------
-CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', default='https://frontend1-lake.vercel.app', cast=Csv())
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "https://frontend1-lake.vercel.app",
+]
+
 CORS_ALLOW_CREDENTIALS = True
 CORS_PREFLIGHT_MAX_AGE = 86400
 
