@@ -277,21 +277,20 @@ def upload_file(request, file: NinjaUploadedFile):
     if not request.user.is_authenticated:
         return api.create_response(request, {"detail": "Authentication required"}, status=401)
 
-    user = request.user
     year = request.POST.get("year") or request.POST.get("year[]")
 
     try:
-        cdn_url = upload_to_supabase(file, file.name)
+        supabase_path = upload_to_supabase(file, file.name)
     except Exception as e:
         return api.create_response(request, {"detail": str(e)}, status=500)
 
     uploaded = UploadedFileModel.objects.create(
-        user=user,
-        file=None,
+        user=request.user,
+        file=None,  # actual file not stored in Django
         filename=file.name,
         size=file.size,
         year=year,
-        cdn_url=cdn_url
+        cdn_url=supabase_path  # this will be used to create signed URL later
     )
 
     return {
@@ -317,20 +316,23 @@ def list_uploaded_files(request):
     result = []
     for f in files:
         try:
-            path = f.cdn_url.split("/object/public/")[-1]
+            # This assumes you're storing the Supabase path (not full URL) in cdn_url
+            path = f.cdn_url  
             signed_url = get_signed_url(path)
-        except:
-            signed_url = f.cdn_url
+        except Exception as e:
+            print(f"Error creating signed URL: {e}")
+            signed_url = None
 
         result.append({
             "id": f.id,
             "filename": f.filename,
-            "cdn_url": signed_url,
+            "cdn_url": signed_url or "",  # fallback
             "size": f.size,
             "year": f.year
         })
 
     return result
+
 
 @api.delete("/uploaded-files/{file_id}/delete")
 def delete_uploaded_file(request, file_id: int):
@@ -345,16 +347,23 @@ def delete_uploaded_file(request, file_id: int):
     except UploadedFileModel.DoesNotExist:
         return api.create_response(request, {"detail": "File not found"}, status=404)
 
-    if uploaded_file.file:
-        uploaded_file.file.delete(save=False)
+    # Optional: delete from Supabase
+    try:
+        path = uploaded_file.cdn_url
+        res = supabase.storage.from_(SUPABASE_BUCKET).remove([path])
+        if hasattr(res, "error") and res.error:
+            print(f"Supabase deletion error: {res.error.message}")
+    except Exception as e:
+        print(f"Supabase removal failed: {e}")
 
     uploaded_file.delete()
     return {"success": True, "detail": "File deleted successfully."}
 
+
 @api.get("/get-signed-url/{filename}")
 def get_signed_url_view(request, filename: str):
     try:
-        path = filename  # Since you returned `path` from upload_to_supabase
+        path = filename.strip()
         url = get_signed_url(path)
         return {"url": url}
     except Exception as e:
