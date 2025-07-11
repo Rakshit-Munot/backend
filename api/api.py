@@ -350,3 +350,12 @@ def delete_uploaded_file(request, file_id: int):
 
     uploaded_file.delete()
     return {"success": True, "detail": "File deleted successfully."}
+
+@api.get("/get-signed-url/{filename}")
+def get_signed_url_view(request, filename: str):
+    try:
+        path = filename  # Since you returned `path` from upload_to_supabase
+        url = get_signed_url(path)
+        return {"url": url}
+    except Exception as e:
+        return api.create_response(request, {"detail": str(e)}, status=500)
