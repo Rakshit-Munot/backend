@@ -27,8 +27,8 @@ class UploadedFileOutSchema(ModelSchema):
 class UploadedFileInSchema(Schema):
     filename: str
     size: int
-    # file: UploadedFile  # If using Ninja's file upload, handle in the API view
-    year: Optional[str] = None 
+    cdn_url: Optional[str] = None  # Public Supabase or external URL
+    year: Optional[str] = None
 
 
 # ...existing code...

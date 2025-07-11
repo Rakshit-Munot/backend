@@ -274,55 +274,120 @@ def import_users(request, file: UploadedFile) -> Response:
         status=201
     )
 
-@api.post("/upload")
-def upload_file(request, file: NinjaUploadedFile):
+from .schemas import UploadedFileInSchema  # already imported in your file
+
+@api.post("/save-file-meta", response=UploadedFileOutSchema)
+def save_file_meta(request, data: UploadedFileInSchema):
     """
-    Upload a file and return its metadata (including CDN URL if available).
-    Accepts an optional 'year' field in the POST data.
+    Save metadata of a file already uploaded via Supabase or external CDN.
     """
     if not request.user.is_authenticated:
         return api.create_response(request, {"detail": "Authentication required"}, status=401)
-    user = request.user if request.user.is_authenticated else None
 
-    # Get year from POST data (FormData)
-    year = request.POST.get("year") or request.POST.get("year[]")  # handle both plain and array style
-
-    # Save file to Django storage
     uploaded = UploadedFileModel.objects.create(
-        user=user,
-        file=file,
-        filename=file.name,
-        size=file.size,
-        year=year,  # Save the year if provided
-        # You can set cdn_url here if you upload to a CDN in your storage backend
+        user=request.user,
+        filename=data.filename,
+        size=data.size,
+        year=data.year,
+        cdn_url=data.cdn_url,
     )
 
-    # If using a CDN, set the cdn_url field here (example for S3/CDN integration)
-    # uploaded.cdn_url = uploaded.file.url  # If your storage backend provides a CDN URL
-    # uploaded.save()
+    return uploaded
+
+
+# @api.post("/upload")
+# def upload_file(request, file: NinjaUploadedFile):
+#     """
+#     Upload a file and return its metadata (including CDN URL if available).
+#     Accepts an optional 'year' field in the POST data.
+#     """
+#     if not request.user.is_authenticated:
+#         return api.create_response(request, {"detail": "Authentication required"}, status=401)
+#     user = request.user if request.user.is_authenticated else None
+
+#     # Get year from POST data (FormData)
+#     year = request.POST.get("year") or request.POST.get("year[]")  # handle both plain and array style
+
+#     # Save file to Django storage
+#     uploaded = UploadedFileModel.objects.create(
+#         user=user,
+#         file=file,
+#         filename=file.name,
+#         size=file.size,
+#         year=year,  # Save the year if provided
+#         # You can set cdn_url here if you upload to a CDN in your storage backend
+#     )
+
+#     # If using a CDN, set the cdn_url field here (example for S3/CDN integration)
+#     # uploaded.cdn_url = uploaded.file.url  # If your storage backend provides a CDN URL
+#     # uploaded.save()
+
+#     return {
+#         "success": True,
+#         "filename": uploaded.filename,
+#         "url": uploaded.cdn_url or (uploaded.file.url if uploaded.file else ""),
+#         "size": uploaded.size,
+#         "id": uploaded.id,
+#         "uploaded_at": uploaded.uploaded_at,
+#         "year": uploaded.year,  # Include year in response
+#     }
+
+from .utils import upload_to_supabase
+
+@api.post("/upload")
+def upload_file(request, file: NinjaUploadedFile):
+    if not request.user.is_authenticated:
+        return api.create_response(request, {"detail": "Authentication required"}, status=401)
+
+    user = request.user
+    year = request.POST.get("year") or request.POST.get("year[]")
+
+    # Upload to Supabase and get public URL
+    try:
+        cdn_url = upload_to_supabase(file, file.name)
+    except Exception as e:
+        return api.create_response(request, {"detail": str(e)}, status=500)
+
+    uploaded = UploadedFileModel.objects.create(
+        user=user,
+        file=None,  # not using Django storage anymore
+        filename=file.name,
+        size=file.size,
+        year=year,
+        cdn_url=cdn_url
+    )
 
     return {
         "success": True,
         "filename": uploaded.filename,
-        "url": uploaded.cdn_url or (uploaded.file.url if uploaded.file else ""),
+        "url": uploaded.cdn_url,
         "size": uploaded.size,
         "id": uploaded.id,
         "uploaded_at": uploaded.uploaded_at,
-        "year": uploaded.year,  # Include year in response
+        "year": uploaded.year,
     }
 
 @api.get("/uploaded-files", response=list[UploadedFileOutSchema])
 def list_uploaded_files(request):
     """
-    List all uploaded files (admin: all, user: own files).
+    List uploaded files.
+    - Admin & faculty: See all.
+    - Students: See only their own.
     """
-    return UploadedFileModel.objects.all().order_by('-uploaded_at')
+    if not request.user.is_authenticated:
+        return api.create_response(request, {"detail": "Authentication required"}, status=401)
+
+    if request.user.role in ["admin", "faculty"]:
+        return UploadedFileModel.objects.all().order_by('-uploaded_at')
+    else:
+        return UploadedFileModel.objects.filter(user=request.user).order_by('-uploaded_at')
+
 
 @api.delete("/uploaded-files/{file_id}/delete")
 def delete_uploaded_file(request, file_id: int):
     """
     Delete an uploaded file.
-    Only admin and faculty can delete files.
+    Only admin or faculty can delete.
     """
     if not request.user.is_authenticated:
         return api.create_response(request, {"detail": "Authentication required"}, status=401)
@@ -336,7 +401,9 @@ def delete_uploaded_file(request, file_id: int):
     except UploadedFileModel.DoesNotExist:
         return api.create_response(request, {"detail": "File not found"}, status=404)
 
-    uploaded_file.file.delete(save=False)  # Delete the file from storage
-    uploaded_file.delete()  # Delete the DB record
+    # ✅ Optional: if you're not using Django FileField anymore (only Supabase), skip deletion of file
+    if uploaded_file.file:
+        uploaded_file.file.delete(save=False)  # Safe delete if Django file exists
 
+    uploaded_file.delete()
     return {"success": True, "detail": "File deleted successfully."}
