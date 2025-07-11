@@ -38,7 +38,7 @@ def upload_to_supabase(file, filename: str) -> str:
             raise Exception(f"Upload failed: {response.error.message}")
 
         # If successful
-        return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{path}"
+        return path
 
     except Exception as e:
         # Extra debugging info

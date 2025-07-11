@@ -17,16 +17,29 @@ from .schemas import (
 )
 from .api_google import router as google_router
 from .dependencies import admin_only as admin_required
-from api.models import StudentProfile, FacultyProfile, StaffProfile,UploadedFile as UploadedFileModel
+from api.models import StudentProfile, FacultyProfile, StaffProfile, UploadedFile as UploadedFileModel
+from .schemas import UploadedFileInSchema
+from .utils import upload_to_supabase
+from decouple import config
+from supabase import create_client
 
 api = NinjaAPI()
 User = get_user_model()
 
+SUPABASE_URL = config("SUPABASE_URL")
+SUPABASE_KEY = config("SUPABASE_KEY")
+SUPABASE_BUCKET = config("SUPABASE_BUCKET")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def get_signed_url(path: str, expires_in: int = 3600) -> str:
+    res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(path, expires_in)
+    if hasattr(res, "error") and res.error:
+        raise Exception(f"Signed URL generation failed: {res.error.message}")
+    return res.get("signedURL")
 
 @api.get("/users", response=list[UserOutSchema])
 def list_users(request):
     return User.objects.all().order_by("username")
-
 
 @api.post("/signup", response=UserOutSchema)
 def create_user(request, data: UserSignupSchema):
@@ -34,7 +47,7 @@ def create_user(request, data: UserSignupSchema):
     username = data.username.strip()
     if not email.endswith("@lnmiit.ac.in"):
         return api.create_response(request, {"detail": "Only LNMIIT emails are allowed"}, status=400)
-    
+
     if User.objects.filter(email=email).exists():
         return api.create_response(request, {"detail": "Email already exists"}, status=400)
 
@@ -51,7 +64,6 @@ def create_user(request, data: UserSignupSchema):
     )
     return user
 
-
 @api.post("/login", response=UserOutSchema)
 def login(request, data: UserLoginSchema):
     email = data.email.strip().lower()
@@ -67,18 +79,15 @@ def login(request, data: UserLoginSchema):
         return api.create_response(request, {"detail": "User account is disabled"}, status=403)
 
     auth_login(request, user)
-    request.session.set_expiry(3600 * 24)  # 1 day session
+    request.session.set_expiry(3600 * 24)
     return user
-
 
 @api.post("/logout")
 def logout(request):
     auth_logout(request)
     return {"message": "Logged out successfully"}
 
-
 api.add_router("/auth", google_router)
-
 
 @api.get("/auth/check")
 def check_auth(request):
@@ -90,7 +99,6 @@ def check_auth(request):
             "role": request.user.role,
         }
 
-        # Add roll_number for students
         if request.user.role == "student":
             try:
                 profile = StudentProfile.objects.get(user=request.user)
@@ -98,13 +106,9 @@ def check_auth(request):
             except StudentProfile.DoesNotExist:
                 user_data["roll_number"] = None
 
-        return {
-            "authenticated": True,
-            "user": user_data,
-        }
+        return {"authenticated": True, "user": user_data}
 
     return {"authenticated": False, "user": None}
-
 
 @api.post("/admin/create-user", response=UserOutSchema)
 @admin_required
@@ -122,20 +126,12 @@ def admin_create_user(request, data: AdminCreateUserSchema):
 
     if data.role == "student":
         if not data.roll_number or not data.department:
-            return api.create_response(
-                request,
-                {"detail": "Student must have roll_number and department"},
-                status=400
-            )
+            return api.create_response(request, {"detail": "Student must have roll_number and department"}, status=400)
         if StudentProfile.objects.filter(roll_number=data.roll_number).exists():
             return api.create_response(request, {"detail": "Roll number already exists"}, status=400)
 
     if data.role in ["faculty", "staff"] and not data.department:
-        return api.create_response(
-            request,
-            {"detail": f"{data.role.capitalize()} must have a department"},
-            status=400
-        )
+        return api.create_response(request, {"detail": f"{data.role.capitalize()} must have a department"}, status=400)
 
     user = User.objects.create_user(
         email=email,
@@ -152,7 +148,6 @@ def admin_create_user(request, data: AdminCreateUserSchema):
         StaffProfile.objects.create(user=user, department=data.department)
 
     return user
-
 
 @api.put("/users/{user_id}/update", response=UserOutSchema)
 @admin_required
@@ -202,7 +197,6 @@ def update_user(request, user_id: int, data: UserUpdateSchema):
 
     return user
 
-
 @api.post("/admin/import-users", response=ExcelImportResponse)
 @admin_required
 def import_users(request, file: UploadedFile) -> Response:
@@ -212,11 +206,7 @@ def import_users(request, file: UploadedFile) -> Response:
     required_columns = {"email", "role", "username", "password"}
     missing = required_columns - set(df.columns)
     if missing:
-        return api.create_response(
-            request,
-            {"detail": f"Missing required columns: {', '.join(missing)}"},
-            status=400
-        )
+        return api.create_response(request, {"detail": f"Missing required columns: {', '.join(missing)}"}, status=400)
 
     success = 0
     failed = []
@@ -263,24 +253,12 @@ def import_users(request, file: UploadedFile) -> Response:
             success += 1
 
         except Exception as e:
-            failed.append({
-                "row": int(index) + 2,
-                "error": str(e)
-            })
+            failed.append({"row": int(index) + 2, "error": str(e)})
 
-    return api.create_response(
-        request,
-        ExcelImportResponse(success_count=success, failed=failed),
-        status=201
-    )
-
-from .schemas import UploadedFileInSchema  # already imported in your file
+    return api.create_response(request, ExcelImportResponse(success_count=success, failed=failed), status=201)
 
 @api.post("/save-file-meta", response=UploadedFileOutSchema)
 def save_file_meta(request, data: UploadedFileInSchema):
-    """
-    Save metadata of a file already uploaded via Supabase or external CDN.
-    """
     if not request.user.is_authenticated:
         return api.create_response(request, {"detail": "Authentication required"}, status=401)
 
@@ -294,46 +272,6 @@ def save_file_meta(request, data: UploadedFileInSchema):
 
     return uploaded
 
-
-# @api.post("/upload")
-# def upload_file(request, file: NinjaUploadedFile):
-#     """
-#     Upload a file and return its metadata (including CDN URL if available).
-#     Accepts an optional 'year' field in the POST data.
-#     """
-#     if not request.user.is_authenticated:
-#         return api.create_response(request, {"detail": "Authentication required"}, status=401)
-#     user = request.user if request.user.is_authenticated else None
-
-#     # Get year from POST data (FormData)
-#     year = request.POST.get("year") or request.POST.get("year[]")  # handle both plain and array style
-
-#     # Save file to Django storage
-#     uploaded = UploadedFileModel.objects.create(
-#         user=user,
-#         file=file,
-#         filename=file.name,
-#         size=file.size,
-#         year=year,  # Save the year if provided
-#         # You can set cdn_url here if you upload to a CDN in your storage backend
-#     )
-
-#     # If using a CDN, set the cdn_url field here (example for S3/CDN integration)
-#     # uploaded.cdn_url = uploaded.file.url  # If your storage backend provides a CDN URL
-#     # uploaded.save()
-
-#     return {
-#         "success": True,
-#         "filename": uploaded.filename,
-#         "url": uploaded.cdn_url or (uploaded.file.url if uploaded.file else ""),
-#         "size": uploaded.size,
-#         "id": uploaded.id,
-#         "uploaded_at": uploaded.uploaded_at,
-#         "year": uploaded.year,  # Include year in response
-#     }
-
-from .utils import upload_to_supabase
-
 @api.post("/upload")
 def upload_file(request, file: NinjaUploadedFile):
     if not request.user.is_authenticated:
@@ -342,7 +280,6 @@ def upload_file(request, file: NinjaUploadedFile):
     user = request.user
     year = request.POST.get("year") or request.POST.get("year[]")
 
-    # Upload to Supabase and get public URL
     try:
         cdn_url = upload_to_supabase(file, file.name)
     except Exception as e:
@@ -350,7 +287,7 @@ def upload_file(request, file: NinjaUploadedFile):
 
     uploaded = UploadedFileModel.objects.create(
         user=user,
-        file=None,  # not using Django storage anymore
+        file=None,
         filename=file.name,
         size=file.size,
         year=year,
@@ -369,30 +306,37 @@ def upload_file(request, file: NinjaUploadedFile):
 
 @api.get("/uploaded-files", response=list[UploadedFileOutSchema])
 def list_uploaded_files(request):
-    """
-    List uploaded files.
-    - Admin & faculty: See all.
-    - Students: See only their own.
-    """
     if not request.user.is_authenticated:
         return api.create_response(request, {"detail": "Authentication required"}, status=401)
 
     if request.user.role in ["admin", "faculty"]:
-        return UploadedFileModel.objects.all().order_by('-uploaded_at')
+        files = UploadedFileModel.objects.all().order_by('-uploaded_at')
     else:
-        return UploadedFileModel.objects.filter(user=request.user).order_by('-uploaded_at')
+        files = UploadedFileModel.objects.filter(user=request.user).order_by('-uploaded_at')
 
+    result = []
+    for f in files:
+        try:
+            path = f.cdn_url.split("/object/public/")[-1]
+            signed_url = get_signed_url(path)
+        except:
+            signed_url = f.cdn_url
+
+        result.append({
+            "id": f.id,
+            "filename": f.filename,
+            "cdn_url": signed_url,
+            "size": f.size,
+            "year": f.year
+        })
+
+    return result
 
 @api.delete("/uploaded-files/{file_id}/delete")
 def delete_uploaded_file(request, file_id: int):
-    """
-    Delete an uploaded file.
-    Only admin or faculty can delete.
-    """
     if not request.user.is_authenticated:
         return api.create_response(request, {"detail": "Authentication required"}, status=401)
 
-    # Only admin and faculty can delete
     if request.user.role not in ["admin", "faculty"]:
         return api.create_response(request, {"detail": "Permission denied"}, status=403)
 
@@ -401,9 +345,8 @@ def delete_uploaded_file(request, file_id: int):
     except UploadedFileModel.DoesNotExist:
         return api.create_response(request, {"detail": "File not found"}, status=404)
 
-    # ✅ Optional: if you're not using Django FileField anymore (only Supabase), skip deletion of file
     if uploaded_file.file:
-        uploaded_file.file.delete(save=False)  # Safe delete if Django file exists
+        uploaded_file.file.delete(save=False)
 
     uploaded_file.delete()
     return {"success": True, "detail": "File deleted successfully."}
