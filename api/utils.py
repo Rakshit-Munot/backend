@@ -2,28 +2,45 @@ from supabase import create_client
 from uuid import uuid4
 from decouple import config
 
+# Environment variables
 SUPABASE_URL = config("SUPABASE_URL")
-SUPABASE_KEY = config("SUPABASE_KEY")  # Use service role key if you want to bypass RLS
+SUPABASE_KEY = config("SUPABASE_KEY")  # Use service role key if bypassing RLS
 BUCKET_NAME = config("SUPABASE_BUCKET")
 
+# Initialize Supabase client
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def upload_to_supabase(file, filename: str) -> str:
+    """
+    Uploads a file to Supabase Storage and returns the public URL.
+    
+    Raises:
+        Exception: If the upload fails.
+    """
     unique_name = f"{uuid4().hex}_{filename}"
-    path = f"{unique_name}"
+    path = unique_name
 
-    # Read content from the Django InMemoryUploadedFile
-    content = file.read()
-    file.seek(0)  # Reset pointer in case you need to use file again later
+    try:
+        # Read and reset pointer
+        content = file.read()
+        file.seek(0)
 
-    # Upload file to Supabase Storage
-    response = supabase.storage.from_(BUCKET_NAME).upload(
-        path, content, {"content-type": file.content_type}
-    )
+        # Upload to Supabase Storage
+        response = supabase.storage.from_(BUCKET_NAME).upload(
+            path, content, {"content-type": file.content_type}
+        )
 
-    # Check for errors
-    if response.get("error"):
-        raise Exception(f"Upload to Supabase failed: {response['error']['message']}")
+        # DEBUG: Inspect response
+        print("Upload response:", response)
 
-    # Return public URL (only works if bucket is public or access policy allows it)
-    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{path}"
+        # If error object exists
+        if hasattr(response, "error") and response.error:
+            raise Exception(f"Upload failed: {response.error.message}")
+
+        # If successful
+        return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{path}"
+
+    except Exception as e:
+        # Extra debugging info
+        print("Exception during upload:", e)
+        raise e
