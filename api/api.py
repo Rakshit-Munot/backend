@@ -322,18 +322,25 @@ def list_uploaded_files(request):
     if not request.user.is_authenticated:
         raise HttpError(401, "Authentication required")
 
+    # 🔍 Debug user info
+    print("👤 request.user:", request.user)
+    print("🔐 request.user.role:", getattr(request.user, "role", None))
+
     files = (
         UploadedFileModel.objects.all()
         if request.user.role in ["admin", "faculty"]
         else UploadedFileModel.objects.filter(user=request.user)
     ).order_by("-uploaded_at")
 
+    # 🔍 Debug what files are being fetched
+    print("📁 File count:", files.count())
+    print("📄 Files:", [(f.id, f.filename) for f in files])
+
     result = []
     for f in files:
         signed_url = ""
         if f.cdn_url:
             try:
-                # ✅ Prepend full path
                 full_path = f"uploaded-files/{f.cdn_url}"
                 signed_url = get_signed_url(full_path) or ""
             except Exception as e:
@@ -349,6 +356,7 @@ def list_uploaded_files(request):
         })
 
     return result
+
 
 
 @api.delete("/uploaded-files/{file_id}/delete")
