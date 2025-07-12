@@ -346,7 +346,7 @@ def list_uploaded_files(request):
             "filename": f.filename,
             "size": f.size,
             "uploaded_at": f.uploaded_at,
-            "cdn_url": signed_url or "",
+            "cdn_url": f.cdn_url or "",
             "year": f.year or "",
         })
 
