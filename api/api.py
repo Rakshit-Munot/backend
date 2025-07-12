@@ -324,11 +324,9 @@ def list_uploaded_files(request):
     if not request.user.is_authenticated:
         raise HttpError(401, "Authentication required")
 
-    # 🧑‍💻 Log user info
     print("👤 request.user:", request.user)
     print("🔐 request.user.role:", getattr(request.user, "role", None))
 
-    # 📦 Get files based on role
     files = (
         UploadedFileModel.objects.all()
         if request.user.role in ["admin", "faculty"]
@@ -339,15 +337,27 @@ def list_uploaded_files(request):
     print("📄 Files:", [(f.id, f.filename) for f in files])
 
     result = []
+
     for f in files:
+        signed_url = ""
         try:
-            signed_url = get_signed_url(f.cdn_url) if f.cdn_url else ""
+            if f.cdn_url:
+                print(f"🔗 Signing {f.cdn_url}...")
+                signed_url = get_signed_url(f.cdn_url) or ""
         except Exception as e:
-            print(f"[ERROR] Failed to sign file ID {f.id} ({f.filename}): {e}")
+            print(f"[ERROR] Failed to sign file {f.id} ({f.filename}): {e}")
             signed_url = ""
 
-        # Append all fields — matching UploadedFileOutSchema exactly
-        result.append(UploadedFileOutSchema.from_orm(f).dict() | {"cdn_url": signed_url})
+        # Return dict with signed URL and all required fields
+        result.append({
+            "id": f.id,
+            "user": f.user_id,  # Use user_id (foreign key) to match schema
+            "filename": f.filename,
+            "size": f.size,
+            "uploaded_at": f.uploaded_at,
+            "cdn_url": signed_url,
+            "year": f.year,
+        })
 
     return result
 
