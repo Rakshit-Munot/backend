@@ -63,11 +63,22 @@ class UserUpdateSchema(Schema):
     department: Optional[str]
     roll_number: Optional[str] = None
 
-
-from ninja.files import UploadedFile
 from ninja import Schema
+from pydantic import BaseModel
+from typing import List, Optional
 
-# ✅ Excel Import Response Schema
-class ExcelImportResponse(Schema):
+
+class FailedRow(BaseModel):
+    row: int
+    error: str
+
+    class Config:
+        from_attributes = True  # Enables model creation from dicts or ORM objects
+
+
+class ExcelImportResponse(BaseModel):
     success_count: int
-    failed: List[Dict[str, str]]  # e.g., [{"row": 3, "error": "Email already exists"}]
+    failed: List[FailedRow]
+
+    class Config:
+        from_attributes = True

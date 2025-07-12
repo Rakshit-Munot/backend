@@ -266,7 +266,11 @@ def import_users(request, file: UploadedFile) -> Response:
         except Exception as e:
             failed.append({"row": int(index) + 2, "error": str(e)})
 
-    return api.create_response(request, ExcelImportResponse(success_count=success, failed=failed), status=201)
+    return api.create_response(
+        request,
+        ExcelImportResponse(success_count=success, failed=failed),
+        status=201
+    )
 
 @api.post("/save-file-meta", response=UploadedFileOutSchema)
 def save_file_meta(request, data: UploadedFileInSchema):
