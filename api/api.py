@@ -324,39 +324,33 @@ def list_uploaded_files(request):
     if not request.user.is_authenticated:
         raise HttpError(401, "Authentication required")
 
-    # 🔍 Debug user info
+    # 🧑‍💻 Log user info
     print("👤 request.user:", request.user)
     print("🔐 request.user.role:", getattr(request.user, "role", None))
 
+    # 📦 Get files based on role
     files = (
         UploadedFileModel.objects.all()
         if request.user.role in ["admin", "faculty"]
         else UploadedFileModel.objects.filter(user=request.user)
     ).order_by("-uploaded_at")
 
-    # 🔍 Debug what files are being fetched
     print("📁 File count:", files.count())
     print("📄 Files:", [(f.id, f.filename) for f in files])
 
     result = []
     for f in files:
-        signed_url = ""
-        if f.cdn_url:
-            try:
-                signed_url = get_signed_url(f.cdn_url) or ""
-            except Exception as e:
-                print(f"[ERROR] Skipping file {f.id} {f.filename} — {e}")
-                continue
+        try:
+            signed_url = get_signed_url(f.cdn_url) if f.cdn_url else ""
+        except Exception as e:
+            print(f"[ERROR] Failed to sign file ID {f.id} ({f.filename}): {e}")
+            signed_url = ""
 
-        result.append({
-            "id": f.id,
-            "filename": f.filename,
-            "cdn_url": signed_url,
-            "size": f.size,
-            "year": f.year,
-        })
+        # Append all fields — matching UploadedFileOutSchema exactly
+        result.append(UploadedFileOutSchema.from_orm(f).dict() | {"cdn_url": signed_url})
 
     return result
+
 
 
 
