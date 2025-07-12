@@ -35,15 +35,17 @@ from urllib.parse import urljoin
 
 def get_signed_url(path: str, expires_in: int = 3600) -> str:
     res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(path, expires_in)
-    
-    if hasattr(res, "error") and res.error:
-        raise Exception(f"Signed URL generation failed: {res.error.message}")
-    
-    signed_path = res.get("signedURL")
-    if not signed_path:
-        raise Exception("No signed URL returned")
 
-    return urljoin(SUPABASE_URL + "/storage/v1", signed_path)
+    # If using Supabase Python client (like postgrest-py or storage3), check structure:
+    if isinstance(res, dict):
+        signed_path = res.get("signedURL")
+    else:
+        signed_path = getattr(res, "signedURL", None)
+
+    if not signed_path:
+        raise Exception(f"Signed URL generation failed or returned empty for path: {path}")
+
+    return signed_path  # ✅ Already a full, signed Supabase URL
 
 
 @api.get("/users", response=list[UserOutSchema])
