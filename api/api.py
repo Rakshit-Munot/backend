@@ -43,7 +43,6 @@ def get_signed_url(path: str, expires_in: int = 3600) -> str:
     if not signed_path:
         raise Exception("No signed URL returned")
 
-    # ✅ Combine with your Supabase URL root
     return urljoin(SUPABASE_URL + "/storage/v1", signed_path)
 
 
@@ -323,31 +322,33 @@ def list_uploaded_files(request):
     if not request.user.is_authenticated:
         raise HttpError(401, "Authentication required")
 
-    if request.user.role in ["admin", "faculty"]:
-        files = UploadedFileModel.objects.all().order_by('-uploaded_at')
-    else:
-        files = UploadedFileModel.objects.filter(user=request.user).order_by('-uploaded_at')
+    files = (
+        UploadedFileModel.objects.all()
+        if request.user.role in ["admin", "faculty"]
+        else UploadedFileModel.objects.filter(user=request.user)
+    ).order_by("-uploaded_at")
 
     result = []
     for f in files:
         signed_url = ""
         if f.cdn_url:
             try:
-                signed_url = get_signed_url(f.cdn_url) or ""
+                # ✅ Prepend full path
+                full_path = f"uploaded-files/{f.cdn_url}"
+                signed_url = get_signed_url(full_path) or ""
             except Exception as e:
-                print(f"[ERROR] Skipping file {f.filename} due to bad cdn_url ({f.cdn_url}): {e}")
-                continue  # ❗️Skip bad file instead of raising
+                print(f"[ERROR] Skipping file {f.id} {f.filename} — {e}")
+                continue
 
         result.append({
             "id": f.id,
             "filename": f.filename,
             "cdn_url": signed_url,
             "size": f.size,
-            "year": f.year
+            "year": f.year,
         })
 
     return result
-
 
 
 @api.delete("/uploaded-files/{file_id}/delete")
