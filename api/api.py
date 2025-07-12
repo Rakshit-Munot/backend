@@ -335,7 +335,8 @@ def list_uploaded_files(request):
             try:
                 signed_url = get_signed_url(f.cdn_url) or ""
             except Exception as e:
-                print(f"[ERROR] Failed to generate signed URL for {f.filename}: {e}")
+                print(f"[ERROR] Skipping file {f.filename} due to bad cdn_url ({f.cdn_url}): {e}")
+                continue  # ❗️Skip bad file instead of raising
 
         result.append({
             "id": f.id,
@@ -346,6 +347,7 @@ def list_uploaded_files(request):
         })
 
     return result
+
 
 
 @api.delete("/uploaded-files/{file_id}/delete")
