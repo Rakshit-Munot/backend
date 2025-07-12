@@ -3,24 +3,25 @@ from pydantic import EmailStr, constr
 from typing import Annotated, Literal, Optional
 from .models import CustomUser
 from ninja import Schema, ModelSchema
-from pydantic import EmailStr, constr
+from pydantic import EmailStr, constr , BaseModel
 from typing import Annotated, Literal, Optional, List, Dict
 from .models import CustomUser
 from .models import UploadedFile as UploadedFileModel
+import datetime
 
 # ✅ Output schema for uploaded files
-class UploadedFileOutSchema(ModelSchema):
+class UploadedFileOutSchema(BaseModel):
+    id: int
+    user: int
+    filename: str
+    size: int
+    uploaded_at: datetime.datetime
+    cdn_url: Optional[str]
+    year: Optional[str]
+
     class Config:
-        model = UploadedFileModel
-        model_fields = [
-            'id',
-            'user',
-            'filename',
-            'size',
-            'uploaded_at',
-            'cdn_url',
-            'year',
-        ]
+        from_attributes = True
+
 
 # ✅ Input schema for file upload (if you want to accept extra fields)
 class UploadedFileInSchema(Schema):
