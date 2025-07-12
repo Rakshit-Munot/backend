@@ -343,8 +343,7 @@ def list_uploaded_files(request):
         signed_url = ""
         if f.cdn_url:
             try:
-                full_path = f"uploaded-files/{f.cdn_url}"
-                signed_url = get_signed_url(full_path) or ""
+                signed_url = get_signed_url(f.cdn_url) or ""
             except Exception as e:
                 print(f"[ERROR] Skipping file {f.id} {f.filename} — {e}")
                 continue
