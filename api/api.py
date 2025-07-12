@@ -31,11 +31,21 @@ SUPABASE_KEY = config("SUPABASE_KEY")
 SUPABASE_BUCKET = config("SUPABASE_BUCKET")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+from urllib.parse import urljoin
+
 def get_signed_url(path: str, expires_in: int = 3600) -> str:
     res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(path, expires_in)
+    
     if hasattr(res, "error") and res.error:
         raise Exception(f"Signed URL generation failed: {res.error.message}")
-    return res.get("signedURL")
+    
+    signed_path = res.get("signedURL")
+    if not signed_path:
+        raise Exception("No signed URL returned")
+
+    # ✅ Combine with your Supabase URL root
+    return urljoin(SUPABASE_URL + "/storage/v1", signed_path)
+
 
 @api.get("/users", response=list[UserOutSchema])
 def list_users(request):
@@ -299,7 +309,7 @@ def upload_file(request, file: NinjaUploadedFile):
     return {
         "success": True,
         "filename": uploaded.filename,
-        "url": supabase_path,  # NOTE: this is the path, not a signed URL
+        "url": uploaded.cdn_url,# NOTE: this is the path, not a signed URL
         "size": uploaded.size,
         "id": uploaded.id,
         "uploaded_at": uploaded.uploaded_at,
