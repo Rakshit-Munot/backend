@@ -387,3 +387,34 @@ def get_signed_url_view(request, filename: str):
         return {"url": url}
     except Exception as e:
         return api.create_response(request, {"detail": str(e)}, status=500)
+
+import requests
+from django.http import StreamingHttpResponse, HttpResponse
+from ninja.errors import HttpError
+from ninja.security import django_auth
+
+@api.get("/secure-stream", auth=django_auth)
+def secure_stream(request, path: str):
+    if not request.user.is_authenticated:
+        raise HttpError(401, "Unauthorized")
+
+    try:
+        signed_url = get_signed_url(path, expires_in=60)
+        response = requests.get(signed_url, stream=True, timeout=10)
+
+        if response.status_code != 200:
+            raise Exception(f"Failed to fetch file from Supabase (status: {response.status_code})")
+
+        content_type = response.headers.get("Content-Type", "application/octet-stream")
+        content_disposition = f'inline; filename="{path.split("_", 1)[-1]}"'
+
+        return StreamingHttpResponse(
+            response.iter_content(chunk_size=8192),
+            content_type=content_type,
+            headers={"Content-Disposition": content_disposition},
+        )
+
+    except Exception as e:
+        print(f"[ERROR] Stream failed for {path}: {e}")
+        return HttpResponse("File could not be streamed.", status=500)
+
