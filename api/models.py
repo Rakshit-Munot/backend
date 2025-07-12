@@ -67,7 +67,7 @@ class UploadedFile(models.Model):
     filename = models.CharField(max_length=255)
     size = models.PositiveBigIntegerField()
     uploaded_at = models.DateTimeField(auto_now_add=True)
-    cdn_url = models.URLField(blank=True, null=True)
+    cdn_url = models.CharField(max_length=500, blank=True, null=True)  # Changed from URLField
     year = models.CharField(max_length=10, blank=True, null=True)  # <-- Added year field
 
 

@@ -19,7 +19,6 @@ class UploadedFileOutSchema(ModelSchema):
             'size',
             'uploaded_at',
             'cdn_url',
-            'file',
             'year',
         ]
 

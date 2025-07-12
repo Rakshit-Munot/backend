@@ -277,36 +277,41 @@ def upload_file(request, file: NinjaUploadedFile):
     if not request.user.is_authenticated:
         return api.create_response(request, {"detail": "Authentication required"}, status=401)
 
-    year = request.POST.get("year") or request.POST.get("year[]")
+    # Get year safely
+    year = request.POST.get("year") or request.POST.get("year[]") or None
 
     try:
+        # Upload to Supabase and get the object path (not full URL)
         supabase_path = upload_to_supabase(file, file.name)
     except Exception as e:
-        return api.create_response(request, {"detail": str(e)}, status=500)
+        return api.create_response(request, {"detail": f"Upload failed: {str(e)}"}, status=500)
 
+    # Save metadata to Django DB
     uploaded = UploadedFileModel.objects.create(
         user=request.user,
-        file=None,  # actual file not stored in Django
+        file=None,  # Skipping local storage
         filename=file.name,
         size=file.size,
         year=year,
-        cdn_url=supabase_path  # this will be used to create signed URL later
+        cdn_url=supabase_path,  # Storing the path for signed access
     )
 
     return {
         "success": True,
         "filename": uploaded.filename,
-        "url": uploaded.cdn_url,
+        "url": supabase_path,  # NOTE: this is the path, not a signed URL
         "size": uploaded.size,
         "id": uploaded.id,
         "uploaded_at": uploaded.uploaded_at,
         "year": uploaded.year,
     }
 
+from ninja.errors import HttpError
+
 @api.get("/uploaded-files", response=list[UploadedFileOutSchema])
 def list_uploaded_files(request):
     if not request.user.is_authenticated:
-        return api.create_response(request, {"detail": "Authentication required"}, status=401)
+        raise HttpError(401, "Authentication required")
 
     if request.user.role in ["admin", "faculty"]:
         files = UploadedFileModel.objects.all().order_by('-uploaded_at')
@@ -315,18 +320,17 @@ def list_uploaded_files(request):
 
     result = []
     for f in files:
-        try:
-            # This assumes you're storing the Supabase path (not full URL) in cdn_url
-            path = f.cdn_url  
-            signed_url = get_signed_url(path)
-        except Exception as e:
-            print(f"Error creating signed URL: {e}")
-            signed_url = None
+        signed_url = ""
+        if f.cdn_url:
+            try:
+                signed_url = get_signed_url(f.cdn_url) or ""
+            except Exception as e:
+                print(f"[ERROR] Failed to generate signed URL for {f.filename}: {e}")
 
         result.append({
             "id": f.id,
             "filename": f.filename,
-            "cdn_url": signed_url or "",  # fallback
+            "cdn_url": signed_url,
             "size": f.size,
             "year": f.year
         })
