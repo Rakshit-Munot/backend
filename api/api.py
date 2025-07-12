@@ -324,8 +324,8 @@ def list_uploaded_files(request):
     if not request.user.is_authenticated:
         raise HttpError(401, "Authentication required")
 
-    print("👤 request.user:", request.user)
-    print("🔐 request.user.role:", getattr(request.user, "role", None))
+    print("request.user:", request.user)
+    print("request.user.role:", getattr(request.user, "role", None))
 
     files = (
         UploadedFileModel.objects.all()
@@ -333,8 +333,8 @@ def list_uploaded_files(request):
         else UploadedFileModel.objects.filter(user=request.user)
     ).order_by("-uploaded_at")
 
-    print("📁 File count:", files.count())
-    print("📄 Files:", [(f.id, f.filename) for f in files])
+    print("File count:", files.count())
+    print("Files:", [(f.id, f.filename) for f in files])
 
     result = []
 
@@ -342,27 +342,15 @@ def list_uploaded_files(request):
         signed_url = ""
         try:
             if f.cdn_url:
-                print(f"🔗 Signing {f.cdn_url}...")
+                print(f"Signing {f.cdn_url}...")
                 signed_url = get_signed_url(f.cdn_url) or ""
         except Exception as e:
             print(f"[ERROR] Failed to sign file {f.id} ({f.filename}): {e}")
             signed_url = ""
-
-        # Return dict with signed URL and all required fields
-        result.append({
-            "id": f.id,
-            "user": f.user_id,  # Use user_id (foreign key) to match schema
-            "filename": f.filename,
-            "size": f.size,
-            "uploaded_at": f.uploaded_at,
-            "cdn_url": signed_url or "",
-            "year": f.year or "",
-        })
+        item = {"id": f.id, "user": f.user_id, "filename": f.filename, "size": f.size, "uploaded_at": f.uploaded_at, "cdn_url": signed_url or "", "year": f.year or ""}
+        result.append(item)
 
     return result
-
-
-
 
 @api.delete("/uploaded-files/{file_id}/delete")
 def delete_uploaded_file(request, file_id: int):
