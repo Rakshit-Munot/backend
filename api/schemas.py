@@ -1,5 +1,5 @@
 from ninja import Schema, ModelSchema
-from pydantic import EmailStr, constr
+from pydantic import EmailStr, constr , ConfigDict
 from typing import Annotated, Literal, Optional
 from .models import CustomUser
 from ninja import Schema, ModelSchema
@@ -33,10 +33,15 @@ class UploadedFileInSchema(Schema):
 
 # ...existing code...
 # ✅ Output schema — never includes sensitive data
-class UserOutSchema(ModelSchema):
-    class Config:
-        model = CustomUser
-        model_fields = ['id', 'username', 'email', 'role', 'date_joined', 'is_active']
+class UserOutSchema(BaseModel):
+    id: int
+    username: str
+    email: str
+    role: str
+    date_joined: datetime.datetime
+    is_active: bool
+
+    model_config = ConfigDict(from_attributes=True)
 
 # ✅ Input schema for user signup
 class UserSignupSchema(Schema):

@@ -22,7 +22,7 @@ from .schemas import UploadedFileInSchema
 from .utils import upload_to_supabase
 from decouple import config
 from supabase import create_client
-
+from django.http import HttpRequest
 api = NinjaAPI()
 User = get_user_model()
 
@@ -76,12 +76,13 @@ def create_user(request, data: UserSignupSchema):
     return user
 
 @api.post("/login", response=UserOutSchema)
-def login(request, data: UserLoginSchema):
+def login(request: HttpRequest, data: UserLoginSchema):
     email = data.email.strip().lower()
     password = data.password
 
     if not email.endswith("@lnmiit.ac.in"):
         return api.create_response(request, {"detail": "Only LNMIIT emails are allowed"}, status=400)
+
     user = authenticate(request, email=email, password=password)
     if user is None:
         return api.create_response(request, {"detail": "Invalid email or password"}, status=401)
@@ -89,9 +90,12 @@ def login(request, data: UserLoginSchema):
     if not user.is_active:
         return api.create_response(request, {"detail": "User account is disabled"}, status=403)
 
+    # Log the user in and set session expiry
     auth_login(request, user)
-    request.session.set_expiry(3600 * 24)
-    return user
+    request.session.set_expiry(86400)  # 24 hours
+
+    # Return validated user schema
+    return UserOutSchema.model_validate(user)
 
 @api.post("/logout")
 def logout(request):
