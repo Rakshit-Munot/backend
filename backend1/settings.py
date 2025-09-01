@@ -253,6 +253,20 @@ DATABASES = {
 #         },
 #     },
 # }
+if DEBUG:
+    REDIS_URL = os.getenv("REDIS_URL_LOCAL", "redis://127.0.0.1:6379/1")
+else:
+    REDIS_URL = os.getenv("REDIS_URL", "redis://prod-redis-host:6379/0")
+
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": REDIS_URL,  # e.g. redis://red-xxxx:6379/0
+    }
+}
+
+SESSION_ENGINE = "django.contrib.sessions.backends.cache"
+SESSION_CACHE_ALIAS = "default"
 
 # -----------------------------------------------------------------------------
 # AUTH

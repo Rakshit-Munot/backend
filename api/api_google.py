@@ -4,6 +4,7 @@ from google.auth.transport import requests
 from fastapi import HTTPException
 from django.contrib.auth import get_user_model, login as auth_login
 from django.http import JsonResponse
+from django.core.cache import cache
 
 router = Router()
 User = get_user_model()
@@ -14,14 +15,26 @@ class TokenSchema(Schema):
 @router.post("/google-login")
 def google_login(request, data: TokenSchema):
     try:
-        idinfo = id_token.verify_oauth2_token(data.token, requests.Request())
+        # Check if token is cached (avoid repeated verification)
+        cache_key = f"google_token:{data.token}"
+        idinfo = cache.get(cache_key)
+
+        if not idinfo:
+            idinfo = id_token.verify_oauth2_token(data.token, requests.Request())
+            cache.set(cache_key, idinfo, timeout=60*5)  # cache 5 minutes
+
         email = idinfo['email']
 
-        # Check if user exists
-        try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
-            return JsonResponse({"detail": "Email not registered. Please sign up first."}, status=400)
+        # Cache user lookup
+        user_cache_key = f"user:{email}"
+        user = cache.get(user_cache_key)
+
+        if not user:
+            try:
+                user = User.objects.get(email=email)
+                cache.set(user_cache_key, user, timeout=60*5)
+            except User.DoesNotExist:
+                return JsonResponse({"detail": "Email not registered. Please sign up first."}, status=400)
 
         # Django session login
         auth_login(request, user)
@@ -39,7 +52,6 @@ def google_login(request, data: TokenSchema):
 
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid Google token")
-
 
 class GoogleSignUpSchema(Schema):
     email: str

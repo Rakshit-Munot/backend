@@ -23,6 +23,7 @@ from .utils import upload_to_supabase
 from decouple import config
 from supabase import create_client
 from django.http import HttpRequest
+from django.core.cache import cache
 api = NinjaAPI()
 User = get_user_model()
 
@@ -83,18 +84,24 @@ def login(request: HttpRequest, data: UserLoginSchema):
     if not email.endswith("@lnmiit.ac.in"):
         return api.create_response(request, {"detail": "Only LNMIIT emails are allowed"}, status=400)
 
-    user = authenticate(request, email=email, password=password)
+    # Try cache first
+    cache_key = f"user_auth:{email}"
+    user = cache.get(cache_key)
+
+    if not user:
+        user = authenticate(request, email=email, password=password)
+        if user:
+            cache.set(cache_key, user, timeout=60*5)  # cache 5 minutes
+
     if user is None:
         return api.create_response(request, {"detail": "Invalid email or password"}, status=401)
 
     if not user.is_active:
         return api.create_response(request, {"detail": "User account is disabled"}, status=403)
 
-    # Log the user in and set session expiry
     auth_login(request, user)
-    request.session.set_expiry(86400)  # 24 hours
+    request.session.set_expiry(86400)
 
-    # Return validated user schema
     return UserOutSchema.model_validate(user)
 
 @api.post("/logout")
@@ -106,24 +113,32 @@ api.add_router("/auth", google_router)
 
 @api.get("/auth/check")
 def check_auth(request):
-    if request.user.is_authenticated:
-        user_data = {
-            "id": request.user.id,
-            "username": request.user.username,
-            "email": request.user.email,
-            "role": request.user.role,
-        }
+    if not request.user.is_authenticated:
+        return {"authenticated": False, "user": None}
 
-        if request.user.role == "student":
-            try:
-                profile = StudentProfile.objects.get(user=request.user)
-                user_data["roll_number"] = profile.roll_number
-            except StudentProfile.DoesNotExist:
-                user_data["roll_number"] = None
+    cache_key = f"user_check:{request.user.id}"
+    cached_data = cache.get(cache_key)
+    if cached_data:
+        return cached_data
 
-        return {"authenticated": True, "user": user_data}
+    user_data = {
+        "id": request.user.id,
+        "username": request.user.username,
+        "email": request.user.email,
+        "role": request.user.role,
+    }
 
-    return {"authenticated": False, "user": None}
+    if request.user.role == "student":
+        try:
+            profile = StudentProfile.objects.get(user=request.user)
+            user_data["roll_number"] = profile.roll_number
+        except StudentProfile.DoesNotExist:
+            user_data["roll_number"] = None
+
+    response = {"authenticated": True, "user": user_data}
+    cache.set(cache_key, response, timeout=60*5)  # cache for 5 minutes
+    return response
+
 
 @api.post("/admin/create-user", response=UserOutSchema)
 @admin_required
@@ -162,7 +177,12 @@ def admin_create_user(request, data: AdminCreateUserSchema):
     elif data.role == "staff":
         StaffProfile.objects.create(user=user, department=data.department)
 
+    # Invalidate cached data for this user
+    cache.delete(f"user_check:{user.id}")
+    cache.delete(f"user_full_detail:{user.id}")
+
     return user
+
 
 @api.put("/users/{user_id}/update", response=UserOutSchema)
 @admin_required
@@ -210,7 +230,69 @@ def update_user(request, user_id: int, data: UserUpdateSchema):
             profile.department = data.department
             profile.save()
 
+    # Invalidate cached data for this user
+    cache.delete(f"user_check:{user.id}")
+    cache.delete(f"user_full_detail:{user.id}")
+
     return user
+
+
+@api.get("/auth/full-detail")
+def full_user_detail(request):
+    if not request.user.is_authenticated:
+        return {"authenticated": False, "user": None}
+
+    cache_key = f"user_full_detail:{request.user.id}"
+    cached_data = cache.get(cache_key)
+    if cached_data:
+        return cached_data
+
+    user = request.user
+    user_data = {
+        "id": str(user.id),
+        "username": user.username or "",
+        "email": user.email or "",
+        "role": user.role or "",
+        "first_name": user.first_name or "",
+        "last_name": user.last_name or "",
+        "profile_picture": getattr(user, "profile_picture", "") or "",
+        "date_joined": str(user.date_joined),
+        "last_login": str(user.last_login),
+        "is_active": user.is_active,
+        "is_superuser": user.is_superuser,
+        "is_staff": user.is_staff,
+    }
+
+    # Role-specific info
+    if user.role == "student":
+        try:
+            profile = StudentProfile.objects.get(user=user)
+            user_data.update({
+                "roll_number": profile.roll_number or "",
+                "department": profile.department or "",
+                "year": profile.year or ""
+            })
+        except StudentProfile.DoesNotExist:
+            user_data.update({"roll_number": "", "department": "", "year": ""})
+
+    elif user.role == "faculty":
+        try:
+            profile = FacultyProfile.objects.get(user=user)
+            user_data["department"] = profile.department or ""
+        except FacultyProfile.DoesNotExist:
+            user_data["department"] = ""
+
+    elif user.role == "staff":
+        try:
+            profile = StaffProfile.objects.get(user=user)
+            user_data["department"] = profile.department or ""
+        except StaffProfile.DoesNotExist:
+            user_data["department"] = ""
+
+    response = {"authenticated": True, "user": user_data}
+    cache.set(cache_key, response, timeout=60*5)  # 5 min cache
+    return response
+
 
 @api.post("/admin/import-users", response=ExcelImportResponse)
 @admin_required
@@ -276,6 +358,10 @@ def import_users(request, file: UploadedFile) -> Response:
         status=201
     )
 
+
+#File Handling
+from django.core.cache import cache
+
 @api.post("/save-file-meta", response=UploadedFileOutSchema)
 def save_file_meta(request, data: UploadedFileInSchema):
     if not request.user.is_authenticated:
@@ -289,48 +375,56 @@ def save_file_meta(request, data: UploadedFileInSchema):
         cdn_url=data.cdn_url,
     )
 
+    # Cache metadata for this file (5 minutes)
+    cache.set(f"file_meta:{uploaded.id}", uploaded, timeout=300)
+
     return uploaded
+
 
 @api.post("/upload")
 def upload_file(request, file: NinjaUploadedFile):
     if not request.user.is_authenticated:
         return api.create_response(request, {"detail": "Authentication required"}, status=401)
 
-    # Get year safely
     year = request.POST.get("year") or request.POST.get("year[]") or None
 
     try:
-        # Upload to Supabase and get the object path (not full URL)
         supabase_path = upload_to_supabase(file, file.name)
     except Exception as e:
         return api.create_response(request, {"detail": f"Upload failed: {str(e)}"}, status=500)
 
-    # Save metadata to Django DB
     uploaded = UploadedFileModel.objects.create(
         user=request.user,
-        file=None,  # Skipping local storage
+        file=None,
         filename=file.name,
         size=file.size,
         year=year,
-        cdn_url=supabase_path,  # Storing the path for signed access
+        cdn_url=supabase_path,
     )
+
+    # Cache metadata
+    cache.set(f"file_meta:{uploaded.id}", uploaded, timeout=300)
 
     return {
         "success": True,
         "filename": uploaded.filename,
-        "url": uploaded.cdn_url,# NOTE: this is the path, not a signed URL
+        "url": uploaded.cdn_url,
         "size": uploaded.size,
         "id": uploaded.id,
         "uploaded_at": uploaded.uploaded_at,
         "year": uploaded.year,
     }
 
-from ninja.errors import HttpError
 
 @api.get("/uploaded-files", response=list[UploadedFileOutSchema])
 def list_uploaded_files(request):
     if not request.user.is_authenticated:
         raise HttpError(401, "Authentication required")
+
+    cache_key = f"uploaded_files:{request.user.id}"
+    cached_files = cache.get(cache_key)
+    if cached_files:
+        return cached_files
 
     files = (
         UploadedFileModel.objects.all()
@@ -340,14 +434,6 @@ def list_uploaded_files(request):
 
     result = []
     for f in files:
-        signed_url = ""
-        try:
-            if f.cdn_url:
-                signed_url = get_signed_url(f.cdn_url) or ""
-        except Exception as e:
-            print(f"[ERROR] Failed to sign file {f.id}: {e}")
-            signed_url = ""
-
         result.append({
             "id": f.id,
             "user": f.user_id,
@@ -358,6 +444,8 @@ def list_uploaded_files(request):
             "year": f.year or "",
         })
 
+    # Cache the list for 5 minutes
+    cache.set(cache_key, result, timeout=300)
     return result
 
 
@@ -374,7 +462,6 @@ def delete_uploaded_file(request, file_id: int):
     except UploadedFileModel.DoesNotExist:
         return api.create_response(request, {"detail": "File not found"}, status=404)
 
-    # Optional: delete from Supabase
     try:
         path = uploaded_file.cdn_url
         res = supabase.storage.from_(SUPABASE_BUCKET).remove([path])
@@ -384,17 +471,28 @@ def delete_uploaded_file(request, file_id: int):
         print(f"Supabase removal failed: {e}")
 
     uploaded_file.delete()
+
+    # Invalidate cache
+    cache.delete(f"file_meta:{file_id}")
+    cache.delete(f"uploaded_files:{request.user.id}")
+
     return {"success": True, "detail": "File deleted successfully."}
+
 
 
 @api.get("/get-signed-url/{filename}")
 def get_signed_url_view(request, filename: str):
-    try:
-        path = filename.strip()
-        url = get_signed_url(path)
-        return {"url": url}
-    except Exception as e:
-        return api.create_response(request, {"detail": str(e)}, status=500)
+    cache_key = f"signed_url:{filename}"
+    url = cache.get(cache_key)
+
+    if not url:
+        try:
+            url = get_signed_url(filename)
+            cache.set(cache_key, url, timeout=60*5)  # cache 5 minutes
+        except Exception as e:
+            return api.create_response(request, {"detail": str(e)}, status=500)
+
+    return {"url": url}
 
 import requests
 from django.http import StreamingHttpResponse, HttpResponse
@@ -406,10 +504,19 @@ def secure_stream(request, path: str):
     if not request.user.is_authenticated:
         raise HttpError(401, "Unauthorized")
 
-    try:
-        signed_url = get_signed_url(path, expires_in=60)
-        response = requests.get(signed_url, stream=True, timeout=10)
+    cache_key = f"signed_stream:{path}"
+    signed_url = cache.get(cache_key)
 
+    if not signed_url:
+        try:
+            signed_url = get_signed_url(path, expires_in=60)
+            cache.set(cache_key, signed_url, timeout=50)  # cache for 50 seconds
+        except Exception as e:
+            print(f"[ERROR] Failed to generate signed URL for {path}: {e}")
+            return HttpResponse("File could not be streamed.", status=500)
+
+    try:
+        response = requests.get(signed_url, stream=True, timeout=10)
         if response.status_code != 200:
             raise Exception(f"Failed to fetch file from Supabase (status: {response.status_code})")
 
@@ -425,4 +532,3 @@ def secure_stream(request, path: str):
     except Exception as e:
         print(f"[ERROR] Stream failed for {path}: {e}")
         return HttpResponse("File could not be streamed.", status=500)
-

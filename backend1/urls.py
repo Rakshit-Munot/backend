@@ -18,7 +18,8 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-from django.http import JsonResponse
+from django.http import JsonResponse,HttpResponse
+from django.core.cache import cache
 
 # API routers
 from api.api import api
@@ -28,11 +29,17 @@ from intruments.api import api as instruments
 def health_check(request):
     return JsonResponse({"status": "ok"})
 
+def cache_ping(_request):
+    cache.set("hello", "world", 30)
+    return HttpResponse(cache.get("hello", "miss"))
+
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', api.urls),
     path('instruments/', instruments.urls),
     path('health/', health_check),
+    path("cache-ping/", cache_ping),
 ]
 
 # Only add debug toolbar & static media in development
