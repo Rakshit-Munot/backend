@@ -87,3 +87,56 @@ class ExcelImportResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class UserOut(BaseModel):
+    id: int
+    username: Optional[str]
+    email: str
+    role: str
+    phone: Optional[str] = None
+    branch: Optional[str] = None
+    year: Optional[str] = None
+    roll_number: Optional[str] = None
+    lab_days: List[str] = []
+    department: Optional[str] = None
+    date_joined: Optional[str] = None
+    last_login: Optional[str] = None
+    is_active: Optional[bool] = True
+
+    class Config:
+        from_attributes = True  # Important: allows creating from ORM objects
+
+class StudentProfileOut(Schema):
+    roll_number: str
+    branch: str
+    year: str
+    lab_day: str
+
+class FacultyProfileOut(Schema):
+    department: str
+    lab_days: List[str]
+
+class StaffProfileOut(Schema):
+    department: str
+    lab_days: List[str]
+
+# ==========================
+# Bills
+# ==========================
+class BillOut(Schema):
+    id: int
+    bill_no: str
+    amount: float
+    file_url: str
+    original_filename: Optional[str] = None
+    public_id: Optional[str] = None
+    resource_type: Optional[str] = None
+    comment: Optional[str] = None
+    uploaded_at: datetime.datetime
+    financial_year: str
+
+class PaginatedBills(Schema):
+    items: List[BillOut]
+    page: int
+    total_pages: int
+    total: int
