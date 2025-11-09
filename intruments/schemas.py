@@ -75,87 +75,131 @@
 
 # For deeply nested relations or complex serialization, it's harder to control formatting.
 
-from ninja import ModelSchema, Schema
-from pydantic import BaseModel, Field, EmailStr
-from .models import Item,IssueRequest
-from typing import Optional
-import datetime
-# ✅ Item schema (used for both input and output)
-
-from ninja import ModelSchema, Schema
-from pydantic import BaseModel, Field
-from .models import Category, SubCategory
-
-# Category Schema
-class CategorySchema(ModelSchema):
-    class Config:
-        model = Category
-        model_fields = ['id', 'name']
-
-class CategoryIn(BaseModel):
-    name: str = Field(..., max_length=100)
+from ninja import Schema
+from typing import Optional, List
+from datetime import datetime
 
 
-# SubCategory Schema
-class SubCategorySchema(ModelSchema):
-    class Config:
-        model = SubCategory
-        model_fields = ['id', 'name', 'category']
-        depth = 1
-
-class SubCategoryIn(BaseModel):
-    name: str = Field(..., max_length=100)
-    category_id: int
-
-class ItemSchema(BaseModel):
-    id: int
-    category: CategorySchema
-    sub_category: SubCategorySchema
+class CategoryIn(Schema):
     name: str
-    serial_number: str
-    cost: float
-    quantity: int
-    gst_number: str
-    buyer_name: str
-    buyer_email: EmailStr
-    purchase_date: datetime.datetime
-    bill_number: Optional[str]
-    remarks: Optional[str]
-
-    class Config:
-        from_attributes = True  # ✅ Required for Django ORM
 
 
-class ItemIn(BaseModel):
+class CategorySchema(Schema):
+    id: int
+    name: str
+
+
+class SubCategoryIn(Schema):
+    name: str
     category_id: int
-    sub_category_id: int
-    name: str = Field(..., max_length=100)
-    serial_number: str = Field(..., max_length=100)
-    cost: float = Field(..., gt=0)
-    quantity: int = Field(..., ge=0)
-    gst_number: str = Field(..., max_length=15)
-    buyer_name: str = Field(..., max_length=100)
-    buyer_email: EmailStr
-    purchase_date: datetime.datetime
-    bill_number: Optional[str] = Field(default=None, max_length=50)
-    remarks: Optional[str] = Field(default="")
+
+
+class SubCategorySchema(Schema):
+    id: int
+    name: str
+    category_id: int
+
+
+class ItemIn(Schema):
+    category_id: int
+    sub_category_id: Optional[int] = None
+    name: str
+    quantity: int
+    is_consumable: bool = True
+    is_available: bool = True
+    location: Optional[str] = ""
+    min_issue_limit: int = 1
+    max_issue_limit: int = 1
+    description: Optional[str] = ""
+
+
+class ItemSchema(Schema):
+    id: int
+    name: str
+    category_id: int
+    sub_category_id: Optional[int]
+    quantity: int
+    is_consumable: bool
+    location: Optional[str]
+    is_available: bool
+    min_issue_limit: int
+    max_issue_limit: int
+    description: Optional[str]
+    available_quantity: int
 
 
 class IssueRequestIn(Schema):
     item_id: int
     quantity: int
-    remarks: str = None
+    remarks: Optional[str] = None
 
-class SimpleUserSchema(Schema):
-    id: int
-    name: str = ""
-    email: EmailStr = ""
 
 class IssueRequestSchema(Schema):
     id: int
-    item: ItemSchema
-    user: SimpleUserSchema
+    item_id: int
+    user_id: int
     quantity: int
     status: str
-    created_at: datetime.datetime
-    remarks: str = None
+    created_at: datetime
+    approved_at: Optional[datetime]
+    return_by: Optional[datetime]
+    remarks: Optional[str]
+
+
+class ItemSummary(Schema):
+    id: int
+    name: str
+
+
+class UserSummary(Schema):
+    id: int
+    name: Optional[str] = None
+    email: Optional[str] = None
+
+
+class IssueRequestListSchema(Schema):
+    id: int
+    item: ItemSummary
+    user: UserSummary
+    quantity: int
+    status: str
+    created_at: datetime
+    approved_at: Optional[datetime]
+    return_by: Optional[datetime]
+    remarks: Optional[str]
+
+
+class ApproveRequestIn(Schema):
+    return_days: Optional[int] = None
+    return_by: Optional[datetime] = None
+    remarks: Optional[str] = None
+
+
+class RejectRequestIn(Schema):
+    remarks: Optional[str] = None
+
+
+class BulkApproveIn(Schema):
+    ids: List[int]
+    return_days: Optional[int] = None
+    return_by: Optional[datetime] = None
+    remarks: Optional[str] = None
+
+
+class BulkRejectIn(Schema):
+    ids: List[int]
+    remarks: str
+
+
+class UserCreateIn(Schema):
+    username: str
+    password: str
+    email: Optional[str] = None
+    is_staff: bool = False
+
+
+class UserSchema(Schema):
+    id: int
+    username: str
+    email: Optional[str]
+    is_staff: bool
