@@ -21,7 +21,7 @@ SECRET_KEY = config('SECRET_KEY')  # Load from environment
 DEBUG = config('DEBUG', default=False, cast=bool)
 
 # Allow hosts from environment (comma-separated)
-ALLOWED_HOSTS = ['127.0.0.1', 'localhost', 'backend-4-x6ud.onrender.com']
+ALLOWED_HOSTS = ['127.0.0.1', 'localhost', 'backend-4-x6ud.onrender.com','backend-2-0k6r.onrender.com']
 
 
 
@@ -281,6 +281,7 @@ else:
 CSRF_TRUSTED_ORIGINS = [
     "https://frontend1-lake.vercel.app",
     "https://backend-4-x6ud.onrender.com",
+    "https://backend-2-0k6r.onrender.com",
 ]
 
 CORS_ALLOW_CREDENTIALS = True
