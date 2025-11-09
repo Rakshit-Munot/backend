@@ -1,0 +1,10 @@
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+# Env files
+.env
+.env.local
+# celerybeat
+celerybeat-schedule*
+
