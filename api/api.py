@@ -247,9 +247,11 @@ def forgot_password(request, payload: ForgotPasswordIn):
             "If you did not request this, you can ignore this email."
         )
         try:
-            send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=True)
-        except Exception as _:
-            # Avoid leaking SMTP details to client
+            # Dispatch email via Celery to avoid blocking the request
+            from .tasks import send_email_task
+            send_email_task.delay(subject, body, email)
+        except Exception:
+            # Avoid leaking SMTP/celery details to client
             pass
 
         return {"message": "If an account exists, you will receive an email shortly."}
@@ -341,9 +343,11 @@ def send_reset_otp(request, payload: SendOtpIn):
                 "This code is valid for 10 minutes. Do not share it with anyone."
             )
             try:
-                send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=True)
+                # Dispatch email via Celery to avoid blocking the request
+                from .tasks import send_email_task
+                send_email_task.delay(subject, body, email)
             except Exception:
-                # Do not leak mail server errors to client
+                # Do not leak mail server/celery errors to client
                 pass
 
         # Set resend cooldown regardless of existence
