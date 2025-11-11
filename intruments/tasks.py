@@ -101,15 +101,16 @@ def send_reminder_email(self, request_id: int, when: str):
             """.format(instrument=escape(instrument_name), return_by=escape(_fmt_ist(return_by)))
         )
 
-        send_mail(
-            subject=subject,
-            message=msg,
-            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
-            recipient_list=[user_email],
-            html_message=html_body,
-            fail_silently=False,
-        )
-        logger.info(f"[Task {self.request.id}] Sent '{when}' reminder to {user_email}")
+        # Email sending disabled via Celery (commented out intentionally)
+        # send_mail(
+        #     subject=subject,
+        #     message=msg,
+        #     from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
+        #     recipient_list=[user_email],
+        #     html_message=html_body,
+        #     fail_silently=False,
+        # )
+        # logger.info(f"[Task {self.request.id}] Sent '{when}' reminder to {user_email}")
     except IssueRequest.DoesNotExist:
         logger.warning(f"[Task {self.request.id}] IssueRequest {request_id} not found.")
     except Exception as e:
@@ -179,15 +180,16 @@ def send_issue_approved_email(self, request_id: int):
             """.format(rows=rows)
         )
 
-        send_mail(
-            subject=subject,
-            message=msg,
-            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
-            recipient_list=[user_email],
-            html_message=html_body,
-            fail_silently=False,
-        )
-        logger.info(f"[Task {self.request.id}] Approval email sent to {user_email} for request {request_id}")
+        # Email sending disabled via Celery (commented out intentionally)
+        # send_mail(
+        #     subject=subject,
+        #     message=msg,
+        #     from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
+        #     recipient_list=[user_email],
+        #     html_message=html_body,
+        #     fail_silently=False,
+        # )
+        # logger.info(f"[Task {self.request.id}] Approval email sent to {user_email} for request {request_id}")
     except IssueRequest.DoesNotExist:
         logger.warning(f"[Task {self.request.id}] IssueRequest {request_id} not found for approval email.")
     except Exception as e:
@@ -242,15 +244,16 @@ def send_issue_rejected_email(self, request_id: int):
             """.format(rows=rows)
         )
 
-        send_mail(
-            subject=subject,
-            message=msg,
-            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
-            recipient_list=[user_email],
-            html_message=html_body,
-            fail_silently=False,
-        )
-        logger.info(f"[Task {self.request.id}] Rejection email sent to {user_email} for request {request_id}")
+        # Email sending disabled via Celery (commented out intentionally)
+        # send_mail(
+        #     subject=subject,
+        #     message=msg,
+        #     from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
+        #     recipient_list=[user_email],
+        #     html_message=html_body,
+        #     fail_silently=False,
+        # )
+        # logger.info(f"[Task {self.request.id}] Rejection email sent to {user_email} for request {request_id}")
     except IssueRequest.DoesNotExist:
         logger.warning(f"[Task {self.request.id}] IssueRequest {request_id} not found for rejection email.")
     except Exception as e:
@@ -579,15 +582,16 @@ def send_bulk_issue_approved_email(self, request_ids: list[int], return_days: Op
                 """.format(rows="".join(table_rows))
             )
 
-            send_mail(
-                subject=subject,
-                message=msg,
-                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
-                recipient_list=[email],
-                html_message=html_body,
-                fail_silently=False,
-            )
-            logger.info(f"[Task {self.request.id}] Sent consolidated approved email to {email} ({len(items)} items)")
+            # Email sending disabled via Celery (commented out intentionally)
+            # send_mail(
+            #     subject=subject,
+            #     message=msg,
+            #     from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
+            #     recipient_list=[email],
+            #     html_message=html_body,
+            #     fail_silently=False,
+            # )
+            # logger.info(f"[Task {self.request.id}] Sent consolidated approved email to {email} ({len(items)} items)")
     except Exception as e:
         logger.exception("send_bulk_issue_approved_email failed: %s", e)
 
@@ -663,14 +667,15 @@ def send_bulk_issue_rejected_email(self, request_ids: list[int]):
                 """.format(rows="".join(table_rows))
             )
 
-            send_mail(
-                subject=subject,
-                message=msg,
-                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
-                recipient_list=[email],
-                html_message=html_body,
-                fail_silently=False,
-            )
-            logger.info(f"[Task {self.request.id}] Sent consolidated rejected email to {email} ({len(items)} items)")
+            # Email sending disabled via Celery (commented out intentionally)
+            # send_mail(
+            #     subject=subject,
+            #     message=msg,
+            #     from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
+            #     recipient_list=[email],
+            #     html_message=html_body,
+            #     fail_silently=False,
+            # )
+            # logger.info(f"[Task {self.request.id}] Sent consolidated rejected email to {email} ({len(items)} items)")
     except Exception as e:
         logger.exception("send_bulk_issue_rejected_email failed: %s", e)

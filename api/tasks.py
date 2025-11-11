@@ -13,15 +13,17 @@ def send_email_task(self, subject: str, body: str, to_email: str, html_message: 
     Retries on transient failures.
     """
     try:
-        send_mail(
-            subject=subject,
-            message=body,
-            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
-            recipient_list=[to_email],
-            html_message=html_message,
-            fail_silently=False,
-        )
-        log.info("Email sent to %s: %s", to_email, subject)
+        # Email sending disabled via Celery (commented out intentionally)
+        # send_mail(
+        #     subject=subject,
+        #     message=body,
+        #     from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
+        #     recipient_list=[to_email],
+        #     html_message=html_message,
+        #     fail_silently=False,
+        # )
+        # log.info("Email sent to %s: %s", to_email, subject)
+        pass
     except Exception as exc:
         log.error("Email send failed to %s: %s", to_email, exc)
         raise self.retry(exc=exc)
