@@ -166,7 +166,10 @@ if DEBUG:
 #     },
 # }
 # Prefer managed Redis when provided; fallback to local for development
-REDIS_URL = os.getenv("REDIS_URL") or os.getenv("REDIS_URL_LOCAL") or "redis://127.0.0.1:6379/1"
+if DEBUG:
+    REDIS_URL = "redis://127.0.0.1:6379/1"
+else:
+    REDIS_URL = os.getenv("REDIS_URL") or os.getenv("REDIS_URL_LOCAL") or "redis://127.0.0.1:6379/1"
 # Example (Render): rediss://:PASSWORD@hostname.render.com:6379
 
 # Django Channels is designed to handle WebSockets and background communication in a multi-user, asynchronous way.

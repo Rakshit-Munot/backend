@@ -106,3 +106,8 @@ supabase==2.16.0
 supafunc==0.10.1
 websockets==15.0.1
 cloudinary==1.41.0
+\n+# Email / SendGrid integration
+# django-sendgrid-v5 provides the sendgrid_backend.EmailBackend used in settings
+django-sendgrid-v5==1.2.4
+# (Optional explicit pin; django-sendgrid-v5 depends on sendgrid)
+sendgrid==9.1.0
