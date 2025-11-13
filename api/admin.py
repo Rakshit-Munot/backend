@@ -2,6 +2,7 @@ from django import forms
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from .models import CustomUser, StudentProfile, FacultyProfile, StaffProfile, WEEKDAYS,DEPARTMENT_CHOICES
+from .models import Lab, Handout
 from .forms import CustomUserCreationForm, CustomUserChangeForm
 import uuid
 
@@ -218,3 +219,20 @@ class CustomUserAdmin(UserAdmin):
     # ------------------------
     class Media:
         js = ("admin/js/custom_user_admin.js",)
+
+
+    # ------------------------
+    # Labs & Handouts admin
+    # ------------------------
+
+    @admin.register(Lab)
+    class LabAdmin(admin.ModelAdmin):
+        list_display = ("name", "created_by", "created_at")
+        search_fields = ("name",)
+
+
+    @admin.register(Handout)
+    class HandoutAdmin(admin.ModelAdmin):
+        list_display = ("lab", "title", "original_filename", "uploaded_by", "uploaded_at")
+        list_filter = ("lab",)
+        search_fields = ("title", "original_filename")

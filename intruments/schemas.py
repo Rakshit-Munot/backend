@@ -144,6 +144,8 @@ class IssueRequestSchema(Schema):
     approved_at: Optional[datetime]
     return_by: Optional[datetime]
     remarks: Optional[str]
+    submission_status: Optional[str] = None
+    submitted_at: Optional[datetime] = None
 
 
 class ItemSummary(Schema):
@@ -167,6 +169,8 @@ class IssueRequestListSchema(Schema):
     approved_at: Optional[datetime]
     return_by: Optional[datetime]
     remarks: Optional[str]
+    submission_status: Optional[str] = None
+    submitted_at: Optional[datetime] = None
 
 
 class ApproveRequestIn(Schema):
@@ -203,3 +207,23 @@ class UserSchema(Schema):
     username: str
     email: Optional[str]
     is_staff: bool
+
+
+# Messaging
+class IssueMessageIn(Schema):
+    text: Optional[str] = ""
+    notify_email: Optional[bool] = True
+
+
+class IssueMessageSchema(Schema):
+    id: int
+    issue_request_id: int
+    msg_type: str
+    text: Optional[str]
+    created_at: datetime
+    creator_id: Optional[int] = None
+
+
+class SubmitReturnIn(Schema):
+    message: Optional[str] = ""
+    notify_email: Optional[bool] = True

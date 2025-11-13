@@ -26,6 +26,7 @@ from .schemas import (
 from .api_google import router as google_router
 from .dependencies import admin_only as admin_required
 from api.models import CustomUser,StudentProfile, FacultyProfile, StaffProfile, UploadedFile as UploadedFileModel
+from api.models import Lab, Handout
 from .schemas import UploadedFileInSchema
 from .utils import upload_to_supabase
 from decouple import config
@@ -85,6 +86,8 @@ def get_signed_url(path: str, expires_in: int = 3600) -> str:
 from django.core.cache import cache as _dj_cache
 
 _BILLS_VER_KEY = "bills:cache:version"
+_HANDOUTS_VER_KEY = "handouts:cache:version"
+_LABS_VER_KEY = "labs:cache:version"
 
 
 def _bills_cache_version() -> int:
@@ -118,6 +121,82 @@ def _bills_cache_key(fy: Optional[str], page: int, limit: int) -> str:
 def _bills_years_cache_key() -> str:
     ver = _bills_cache_version()
     return f"bills:v{ver}:years"
+
+def _handouts_cache_version() -> int:
+    try:
+        ver = _dj_cache.get(_HANDOUTS_VER_KEY)
+        if not isinstance(ver, int):
+            _dj_cache.set(_HANDOUTS_VER_KEY, 1, None)
+            return 1
+        return ver
+    except Exception:
+        return 1
+
+
+def _handouts_bump_version():
+    try:
+        if _dj_cache.get(_HANDOUTS_VER_KEY) is None:
+            _dj_cache.set(_HANDOUTS_VER_KEY, 1, None)
+        else:
+            _dj_cache.incr(_HANDOUTS_VER_KEY)
+    except Exception:
+        _dj_cache.set(_HANDOUTS_VER_KEY, int(time.time()), None)
+
+
+def _handouts_cache_key(lab_id: Optional[int], page: int, limit: int, q: Optional[str]) -> str:
+    ver = _handouts_cache_version()
+    lab_part = f"lab={lab_id if lab_id is not None else 'ALL'}"
+    q_part = f"q={q.strip().lower() if q else ''}"
+    return f"handouts:v{ver}:{lab_part}:{q_part}:p={page}:l={limit}"
+
+# Labs cache helpers
+def _labs_cache_version() -> int:
+    try:
+        ver = _dj_cache.get(_LABS_VER_KEY)
+        if not isinstance(ver, int):
+            _dj_cache.set(_LABS_VER_KEY, 1, None)
+            return 1
+        return ver
+    except Exception:
+        return 1
+
+def _labs_bump_version():
+    try:
+        if _dj_cache.get(_LABS_VER_KEY) is None:
+            _dj_cache.set(_LABS_VER_KEY, 1, None)
+        else:
+            _dj_cache.incr(_LABS_VER_KEY)
+    except Exception:
+        _dj_cache.set(_LABS_VER_KEY, int(time.time()), None)
+
+def _labs_cache_key() -> str:
+    ver = _labs_cache_version()
+    return f"labs:v{ver}:all"
+
+
+async def notify_handout_update(event_type: str, handout_obj):
+    from channels.layers import get_channel_layer
+    channel_layer = get_channel_layer()
+    await channel_layer.group_send(
+        "handout_updates",
+        {
+            "type": "send_handout_update",
+            "data": {
+                "event": event_type,
+                "id": handout_obj.id,
+                "title": handout_obj.title,
+                "comment": getattr(handout_obj, "comment", None),
+                "file_url": handout_obj.file_url,
+                "original_filename": handout_obj.original_filename,
+                "public_id": handout_obj.public_id,
+                "resource_type": handout_obj.resource_type,
+                "uploaded_at": str(handout_obj.uploaded_at),
+                "lab_id": handout_obj.lab_id,
+                "lab_name": getattr(handout_obj.lab, "name", None),
+            },
+        },
+    )
+    # end notify_handout_update
 
 
 @api.get("/users", response=list[UserOutSchema])
@@ -1064,9 +1143,13 @@ import cloudinary.uploader
 from django.conf import settings
 from .models import Bill
 from .schemas import BillOut, PaginatedBills
+from .schemas import LabOut, HandoutOut, PaginatedHandouts
 from ninja import Schema
 
 class UpdateBillCommentIn(Schema):
+    comment: Optional[str] = None
+
+class UpdateHandoutCommentIn(Schema):
     comment: Optional[str] = None
 
 @api.post("/bills/upload")
@@ -1911,3 +1994,696 @@ def export_bills_top_level(request, fy: Optional[str] = None, q: Optional[str] =
     except Exception:
         pass
     return resp
+
+# =============================
+# Labs & Handouts
+# =============================
+
+@api.get("/labs", response=list[LabOut])
+def list_labs(request):
+    if not request.user.is_authenticated:
+        return api.create_response(request, {"detail": "Authentication required"}, status=401)
+    # Cached list of labs for faster upload modal opening
+    cache_key = _labs_cache_key()
+    cached = _dj_cache.get(cache_key)
+    if cached:
+        return cached
+    labs = list(Lab.objects.all().order_by("name"))
+    _dj_cache.set(cache_key, labs, 300)  # 5 minutes
+    return labs
+
+
+@api.post("/labs/create", response=LabOut)
+@admin_required
+def create_lab(request, name: str = Form(...)):
+    name = (name or "").strip()
+    if not name:
+        return api.create_response(request, {"detail": "Name required"}, status=400)
+    lab, created = Lab.objects.get_or_create(name=name, defaults={"created_by": request.user})
+    # Invalidate labs cache version
+    _labs_bump_version()
+    return lab
+
+
+@api.get("/labs/{lab_id}/handouts", response=PaginatedHandouts)
+def list_lab_handouts(request, lab_id: int, q: Optional[str] = None, page: int = 1, limit: int = 10, year: Optional[int] = None):
+    if not request.user.is_authenticated:
+        return api.create_response(request, {"detail": "Authentication required"}, status=401)
+    try:
+        lab = Lab.objects.get(id=lab_id)
+    except Lab.DoesNotExist:
+        return api.create_response(request, {"detail": "Lab not found"}, status=404)
+    page = max(1, page)
+    limit = max(1, min(100, limit))
+
+    # Caching key (lab-specific + optional search + optional year)
+    yr_q = f"{(q or '').strip()}||year:{(year or '')}"
+    cache_key = _handouts_cache_key(lab_id, page, limit, yr_q)
+    cached = _dj_cache.get(cache_key)
+    if cached:
+        return cached
+    qs = Handout.objects.filter(lab=lab).order_by("-uploaded_at")
+    if q:
+        from django.db.models import Q
+        qq = q.strip()
+        if qq:
+            qs = qs.filter(Q(title__icontains=qq) | Q(description__icontains=qq) | Q(original_filename__icontains=qq))
+    if year:
+        try:
+            qs = qs.filter(uploaded_at__year=int(year))
+        except Exception:
+            pass
+    total = qs.count()
+    start = (page - 1) * limit
+    items_qs = qs[start:start+limit]
+    total_pages = (total + limit - 1) // limit
+
+    items = []
+    for h in items_qs:
+        # If Supabase path, sign; if Cloudinary URL, return as-is
+        url = h.file_url
+        if url and not str(url).startswith(("http://", "https://")):
+            try:
+                url = get_signed_url(url)
+            except Exception:
+                pass
+        items.append({
+            "id": h.id,
+            "title": h.title,
+            "description": h.description,
+            "comment": getattr(h, "comment", None),
+            "file_url": url,
+            "original_filename": h.original_filename,
+            "uploaded_at": h.uploaded_at,
+        })
+    result = {"items": items, "page": page, "total_pages": total_pages, "total": total}
+    _dj_cache.set(cache_key, result, 300)
+    return result
+
+
+@api.get("/handouts", response=PaginatedHandouts)
+def list_all_handouts(request, q: Optional[str] = None, page: int = 1, limit: int = 10, lab_id: Optional[int] = None, year: Optional[int] = None):
+    if not request.user.is_authenticated:
+        return api.create_response(request, {"detail": "Authentication required"}, status=401)
+    page = max(1, page)
+    limit = max(1, min(100, limit))
+
+    yr_q = f"{(q or '').strip()}||year:{(year or '')}"
+    cache_key = _handouts_cache_key(lab_id, page, limit, yr_q)
+    cached = _dj_cache.get(cache_key)
+    if cached:
+        return cached
+    qs = Handout.objects.all().order_by("-uploaded_at")
+    if lab_id:
+        qs = qs.filter(lab_id=lab_id)
+    if q:
+        from django.db.models import Q
+        qq = q.strip()
+        if qq:
+            qs = qs.filter(Q(title__icontains=qq) | Q(description__icontains=qq) | Q(original_filename__icontains=qq))
+    if year:
+        try:
+            qs = qs.filter(uploaded_at__year=int(year))
+        except Exception:
+            pass
+    total = qs.count()
+    start = (page - 1) * limit
+    items_qs = qs[start:start+limit]
+    total_pages = (total + limit - 1) // limit
+
+    items = []
+    for h in items_qs:
+        url = h.file_url
+        if url and not str(url).startswith(("http://", "https://")):
+            try:
+                url = get_signed_url(url)
+            except Exception:
+                pass
+        items.append({
+            "id": h.id,
+            "title": h.title,
+            "description": h.description,
+            "comment": getattr(h, "comment", None),
+            "file_url": url,
+            "original_filename": h.original_filename,
+            "uploaded_at": h.uploaded_at,
+        })
+    result = {"items": items, "page": page, "total_pages": total_pages, "total": total}
+    _dj_cache.set(cache_key, result, 300)
+    return result
+
+
+@api.post("/labs/{lab_id}/handouts/upload", response=HandoutOut)
+@admin_required
+def upload_lab_handout(
+    request,
+    lab_id: int,
+    file: NinjaUploadFile = File(...),
+    title: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    comment: Optional[str] = Form(None),
+):
+    try:
+        lab = Lab.objects.get(id=lab_id)
+    except Lab.DoesNotExist:
+        return api.create_response(request, {"detail": "Lab not found"}, status=404)
+
+    try:
+        import cloudinary
+        import cloudinary.uploader
+        from django.conf import settings as _settings
+
+        django_file = getattr(file, "file", None) or file
+        original_name = getattr(file, "name", "handout")
+
+        # Detect type
+        file_ext = ""
+        if "." in original_name:
+            file_ext = original_name.rsplit(".", 1)[-1].lower()
+        content_type = getattr(file, "content_type", None) or ""
+        image_exts = {"jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff"}
+        video_exts = {"mp4", "webm", "mov", "avi", "mkv", "m4v", "ogv"}
+        is_image = content_type.startswith("image/") or file_ext in image_exts
+        is_video = content_type.startswith("video/") or file_ext in video_exts
+        is_pdf = (content_type == "application/pdf") or file_ext == "pdf"
+
+        # Ensure Cloudinary configured
+        cfg = cloudinary.config()
+        if not (cfg.api_key and cfg.api_secret and cfg.cloud_name):
+            cloudinary.config(
+                cloud_name=getattr(_settings, 'CLOUDINARY_CLOUD_NAME', None) or os.getenv('CLOUDINARY_CLOUD_NAME'),
+                api_key=getattr(_settings, 'CLOUDINARY_API_KEY', None) or os.getenv('CLOUDINARY_API_KEY'),
+                api_secret=getattr(_settings, 'CLOUDINARY_API_SECRET', None) or os.getenv('CLOUDINARY_API_SECRET'),
+                secure=True,
+            )
+
+        unique_id = uuid.uuid4().hex[:12]
+        clean_name = original_name.rsplit(".", 1)[0] if "." in original_name else original_name
+        clean_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in clean_name)[:50]
+        public_id_base = f"handouts/{clean_name}_{unique_id}"
+        if is_video:
+            chosen_resource_type = "video"
+        elif is_image or is_pdf:
+            chosen_resource_type = "image"
+        else:
+            chosen_resource_type = "raw"
+        upload_params = {
+            "public_id": public_id_base,
+            "resource_type": chosen_resource_type,
+            "overwrite": False,
+            "type": "upload",
+        }
+        if file_ext:
+            upload_params["format"] = file_ext
+
+        result = cloudinary.uploader.upload(django_file, **upload_params)
+        public_id = result.get("public_id")
+        file_url = result.get("secure_url") or result.get("url")
+        resource_type = result.get("resource_type")
+        if not file_url:
+            return api.create_response(request, {"detail": "Cloudinary returned no URL"}, status=502)
+
+        # If no title provided, derive from original filename (without extension)
+        provided_title = (title or "").strip()
+        derived_title = None
+        if not provided_title:
+            derived_title = (original_name.rsplit(".", 1)[0] if "." in original_name else original_name)[:200]
+
+        handout = Handout.objects.create(
+            lab=lab,
+            title=provided_title or derived_title or None,
+            description=(description or "").strip() or None,
+            comment=(comment or "").strip() or None,
+            file_url=file_url,
+            original_filename=original_name,
+            public_id=public_id,
+            resource_type=resource_type,
+            uploaded_by=request.user,
+        )
+        # Bump cache and notify via websocket
+        _handouts_bump_version()
+        try:
+            from asgiref.sync import async_to_sync
+            async_to_sync(notify_handout_update)("created", handout)
+            # If title was derived server-side (not provided), also send an 'updated' to keep clients in sync
+            if derived_title and not provided_title:
+                async_to_sync(notify_handout_update)("updated", handout)
+        except Exception:
+            pass
+
+        return {
+            "id": handout.id,
+            "title": handout.title,
+            "description": handout.description,
+            "comment": handout.comment,
+            "file_url": handout.file_url,
+            "original_filename": handout.original_filename,
+            "uploaded_at": handout.uploaded_at,
+        }
+    except Exception as e:
+        return api.create_response(request, {"detail": f"Upload failed: {e}"}, status=500)
+
+
+@api.delete("/handouts/{handout_id}")
+@admin_required
+def delete_handout(request, handout_id: int):
+    try:
+        h = Handout.objects.get(id=handout_id)
+    except Handout.DoesNotExist:
+        return api.create_response(request, {"detail": "Not found"}, status=404)
+
+    # Remove from storage best-effort (Supabase path or Cloudinary)
+    try:
+        if h.public_id:
+            cloudinary.uploader.destroy(
+                h.public_id,
+                resource_type=h.resource_type or "image",
+                invalidate=True,
+            )
+        else:
+            path = h.file_url
+            if path and not str(path).startswith(("http://", "https://")):
+                res = supabase.storage.from_(SUPABASE_BUCKET).remove([path])
+                if hasattr(res, "error") and res.error:
+                    print(f"[Handout delete] Supabase error: {res.error.message}")
+    except Exception as e:
+        print(f"[Handout delete] Storage removal failed: {e}")
+
+    h.delete()
+    # Bump cache and notify
+    _handouts_bump_version()
+    try:
+        from asgiref.sync import async_to_sync
+        async_to_sync(notify_handout_update)("deleted", h)
+    except Exception:
+        pass
+    return {"success": True}
+
+
+@api.put("/handouts/{handout_id}/comment")
+def update_handout_comment(request, handout_id: int, payload: UpdateHandoutCommentIn):
+    if not request.user.is_authenticated:
+        return api.create_response(request, {"detail": "Authentication required"}, status=401)
+    try:
+        h = Handout.objects.get(id=handout_id)
+    except Handout.DoesNotExist:
+        return api.create_response(request, {"detail": "Not found"}, status=404)
+
+    # Only admins can modify comments (parity with Bills editing permissions)
+    if getattr(request.user, "role", None) != "admin":
+        return api.create_response(request, {"detail": "Unauthorized"}, status=403)
+
+    h.comment = (payload.comment or "").strip() or None
+    h.save(update_fields=["comment", "uploaded_at"])  # uploaded_at unchanged but harmless
+
+    # Bump cache and notify
+    _handouts_bump_version()
+    try:
+        from asgiref.sync import async_to_sync
+        async_to_sync(notify_handout_update)("updated", h)
+    except Exception:
+        pass
+
+    return {
+        "id": h.id,
+        "title": h.title,
+        "description": h.description,
+        "comment": h.comment,
+        "file_url": h.file_url,
+        "original_filename": h.original_filename,
+        "uploaded_at": h.uploaded_at,
+    }
+
+
+@api.get("/handouts/{handout_id}/view")
+def view_handout_file(request, handout_id: int):
+    if not request.user.is_authenticated:
+        return api.create_response(request, {"detail": "Authentication required"}, status=401)
+    try:
+        h = Handout.objects.get(id=handout_id)
+    except Handout.DoesNotExist:
+        return api.create_response(request, {"detail": "Not found"}, status=404)
+
+    # Supabase-backed: short-lived signed URL redirect
+    try:
+        if (h.resource_type == "supabase") or (h.file_url and not str(h.file_url).startswith(("http://", "https://"))):
+            path = h.file_url
+            signed_url = get_signed_url(path, expires_in=300)
+            from django.http import HttpResponseRedirect
+            resp = HttpResponseRedirect(signed_url)
+            resp["Cache-Control"] = "private, max-age=60"
+            return resp
+    except Exception as _:
+        pass
+
+    # Cloudinary: stream inline with robust fallbacks (parity with Bills)
+    try:
+        import re
+        import requests
+        from cloudinary.utils import cloudinary_url, private_download_url
+        import time
+
+        ext = ""
+        if h.original_filename and "." in h.original_filename:
+            ext = h.original_filename.rsplit(".", 1)[-1].lower()
+
+        version = None
+        if h.file_url:
+            m = re.search(r"/v(\d+)/", h.file_url)
+            if m:
+                try:
+                    version = int(m.group(1))
+                except Exception:
+                    version = None
+
+        rt = h.resource_type or "image"
+
+        pub_id = h.public_id or ""
+        try:
+            last = pub_id.rsplit("/", 1)[-1]
+            if "." in last:
+                pub_id_base = pub_id[: -(len(last))] + last.rsplit(".", 1)[0]
+            else:
+                pub_id_base = pub_id
+        except Exception:
+            pub_id_base = pub_id
+
+        if not ext and h.file_url and "." in h.file_url:
+            try:
+                ext = h.file_url.rsplit(".", 1)[-1].lower().split("?")[0]
+            except Exception:
+                pass
+
+        # Generate a signed URL (works with strict/signed delivery accounts)
+        signed_url, _ = cloudinary_url(
+            pub_id_base,
+            format=ext or None,
+            resource_type=rt,
+            type="upload",
+            version=version,
+            sign_url=True,
+            secure=True,
+        )
+
+        fetch_url = signed_url or h.file_url
+        range_header = request.META.get("HTTP_RANGE")
+        req_headers = {}
+        if range_header:
+            req_headers["Range"] = range_header
+
+        response = requests.get(fetch_url, timeout=30, allow_redirects=True, headers=req_headers, stream=True)
+
+        if response.status_code not in (200, 206):
+            # Try direct stored URL
+            try:
+                direct_resp = requests.get(h.file_url, timeout=30, allow_redirects=True, headers=req_headers, stream=True)
+                if direct_resp.status_code in (200, 206):
+                    response = direct_resp
+                # else keep response as-is
+            except Exception:
+                pass
+
+        if response.status_code not in (200, 206):
+            try:
+                expires_at = int(time.time()) + 120
+                purl = private_download_url(
+                    pub_id_base,
+                    ext or None,
+                    resource_type=rt,
+                    type="upload",
+                    expires_at=expires_at,
+                )
+                response = requests.get(purl, timeout=30, allow_redirects=True, headers=req_headers, stream=True)
+            except Exception:
+                pass
+
+        if response.status_code not in (200, 206):
+            try:
+                purl2 = private_download_url(
+                    pub_id_base,
+                    ext or None,
+                    resource_type=rt,
+                    type="upload",
+                )
+                response = requests.get(purl2, timeout=30, allow_redirects=True, headers=req_headers, stream=True)
+            except Exception:
+                pass
+
+        if response.status_code not in (200, 206):
+            snippet = ''
+            try:
+                snippet = response.text[:200]
+            except Exception:
+                pass
+            return api.create_response(request, {"detail": f"Failed to fetch file from Cloudinary (status {response.status_code})", "response": snippet}, status=502)
+
+        content_type = response.headers.get("Content-Type") or "application/octet-stream"
+        if content_type == "application/octet-stream" and ext:
+            if ext == "pdf":
+                content_type = "application/pdf"
+            elif ext in ["jpg", "jpeg"]:
+                content_type = "image/jpeg"
+            elif ext == "png":
+                content_type = "image/png"
+            elif ext == "gif":
+                content_type = "image/gif"
+
+        from django.http import StreamingHttpResponse
+        def stream():
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+        status_code = 206 if response.status_code == 206 else 200
+        http_response = StreamingHttpResponse(stream(), content_type=content_type, status=status_code)
+        http_response["Content-Disposition"] = f'inline; filename="{h.original_filename or "file"}"'
+        http_response["Cache-Control"] = "public, max-age=3600"
+        http_response["Accept-Ranges"] = "bytes"
+        if response.headers.get("Content-Range"):
+            http_response["Content-Range"] = response.headers["Content-Range"]
+        if response.headers.get("Content-Length"):
+            http_response["Content-Length"] = response.headers["Content-Length"]
+        return http_response
+    except Exception as e:
+        return api.create_response(request, {"detail": f"Failed to load file: {e}"}, status=500)
+
+
+@api.get("/handouts/{handout_id}/download")
+def download_handout_file(request, handout_id: int):
+    if not request.user.is_authenticated:
+        return api.create_response(request, {"detail": "Authentication required"}, status=401)
+    try:
+        h = Handout.objects.get(id=handout_id)
+    except Handout.DoesNotExist:
+        return api.create_response(request, {"detail": "Not found"}, status=404)
+
+    # Supabase signed download
+    try:
+        if (h.resource_type == "supabase") or (h.file_url and not str(h.file_url).startswith(("http://", "https://"))):
+            path = h.file_url
+            signed_url = get_signed_url(path, expires_in=300)
+            import requests as _requests
+            resp = _requests.get(signed_url, stream=True, timeout=30)
+            if resp.status_code != 200:
+                return api.create_response(request, {"detail": f"Failed to fetch file (status {resp.status_code})"}, status=502)
+            ext = ""
+            if h.original_filename and "." in h.original_filename:
+                ext = h.original_filename.rsplit(".", 1)[-1].lower()
+            content_type = resp.headers.get("Content-Type") or "application/octet-stream"
+            if content_type == "application/octet-stream" and ext == "pdf":
+                content_type = "application/pdf"
+            from django.http import StreamingHttpResponse
+            def _stream():
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        yield chunk
+            http_response = StreamingHttpResponse(_stream(), content_type=content_type)
+            http_response["Content-Disposition"] = f'attachment; filename="{h.original_filename or "file"}"'
+            return http_response
+    except Exception as _:
+        pass
+
+    # Cloudinary fetch and download
+    try:
+        import re
+        import requests
+        from cloudinary.utils import cloudinary_url
+        ext = ""
+        if h.original_filename and "." in h.original_filename:
+            ext = h.original_filename.rsplit(".", 1)[-1].lower()
+        version = None
+        if h.file_url:
+            m = re.search(r"/v(\d+)/", h.file_url)
+            if m:
+                try:
+                    version = int(m.group(1))
+                except Exception:
+                    version = None
+        rt = h.resource_type or "image"
+        pub_id = h.public_id or ""
+        try:
+            last = pub_id.rsplit("/", 1)[-1]
+            if "." in last:
+                pub_id_base = pub_id[: -(len(last))] + last.rsplit(".", 1)[0]
+            else:
+                pub_id_base = pub_id
+        except Exception:
+            pub_id_base = pub_id
+        signed_url, _ = cloudinary_url(
+            pub_id_base,
+            format=ext or None,
+            resource_type=rt,
+            type="upload",
+            version=version,
+            sign_url=True,
+            secure=True,
+        )
+        response = requests.get(signed_url or h.file_url, timeout=30, allow_redirects=True, stream=True)
+        if response.status_code != 200:
+            return api.create_response(request, {"detail": f"Failed to fetch file (status {response.status_code})"}, status=502)
+        content_type = "application/octet-stream"
+        if ext == "pdf":
+            content_type = "application/pdf"
+        elif ext in ["jpg", "jpeg"]:
+            content_type = "image/jpeg"
+        elif ext == "png":
+            content_type = "image/png"
+        elif ext == "gif":
+            content_type = "image/gif"
+        from django.http import StreamingHttpResponse
+        def stream():
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+        http_response = StreamingHttpResponse(stream(), content_type=content_type)
+        http_response["Content-Disposition"] = f'attachment; filename="{h.original_filename or "file"}"'
+        return http_response
+    except Exception as e:
+        return api.create_response(request, {"detail": f"Failed to load file: {e}"}, status=500)
+
+
+@api.get("/handouts/export.xlsx")
+def export_handouts_xlsx(request, q: Optional[str] = None, lab_id: Optional[int] = None, format: Optional[str] = None, year: Optional[int] = None):
+    if not request.user.is_authenticated:
+        return api.create_response(request, {"detail": "Authentication required"}, status=401)
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment
+    from openpyxl.cell.cell import WriteOnlyCell
+
+    base = request.build_absolute_uri("/").rstrip("/")
+
+    qs = Handout.objects.all().select_related("lab").order_by("-uploaded_at")
+    if lab_id:
+        try:
+            lab = Lab.objects.get(id=lab_id)
+            qs = qs.filter(lab=lab)
+        except Lab.DoesNotExist:
+            pass
+    if q:
+        from django.db.models import Q
+        qs = qs.filter(
+            Q(title__icontains=q)
+            | Q(original_filename__icontains=q)
+            | Q(comment__icontains=q)
+        )
+    if year:
+        try:
+            qs = qs.filter(uploaded_at__year=int(year))
+        except Exception:
+            pass
+
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("Handouts")
+    headers = ["Name", "Lab", "Upload Date", "Comment", "View", "Download"]
+    header_row = []
+    for h in headers:
+        cell = WriteOnlyCell(ws, value=h)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
+        header_row.append(cell)
+    ws.append(header_row)
+
+    for h in qs:
+        name = (h.title or h.original_filename or "handout").strip()
+        lab_name = h.lab.name if h.lab_id else "—"
+        # Date formatting: date only, like bills export
+        try:
+            dt_str = h.uploaded_at.strftime("%Y-%m-%d")
+        except Exception:
+            dt_str = str(h.uploaded_at)
+        comment = (h.comment or "").replace("\r", " ").replace("\n", " ")
+        view_url = f"{base}/api/handouts/{h.id}/view"
+        dl_url = f"{base}/api/handouts/{h.id}/download"
+        ws.append([name, lab_name, dt_str, comment, view_url, dl_url])
+
+    # Best-effort column widths
+    try:
+        # write_only=True sheets don't have column_dimensions width effect until saved; this is a hint
+        ws.column_dimensions['A'].width = 40
+        ws.column_dimensions['B'].width = 24
+        ws.column_dimensions['C'].width = 18
+        ws.column_dimensions['D'].width = 60
+        ws.column_dimensions['E'].width = 40
+        ws.column_dimensions['F'].width = 40
+    except Exception:
+        pass
+
+    from io import BytesIO
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+
+    from django.http import HttpResponse
+    response = HttpResponse(bio.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    response["Content-Disposition"] = 'attachment; filename="handouts_export.xlsx"'
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+@api.get("/handouts/export")
+def handouts_export_alias(request, q: Optional[str] = None, lab_id: Optional[int] = None, format: Optional[str] = None, year: Optional[int] = None):
+    return export_handouts_xlsx(request, q=q, lab_id=lab_id, format=format, year=year)
+
+
+@api.get("/handouts/export/")
+def handouts_export_alias_slash(request, q: Optional[str] = None, lab_id: Optional[int] = None, format: Optional[str] = None, year: Optional[int] = None):
+    return export_handouts_xlsx(request, q=q, lab_id=lab_id, format=format, year=year)
+
+
+@api.get("/handouts/export-file")
+def handouts_export_alias_file(request, q: Optional[str] = None, lab_id: Optional[int] = None, format: Optional[str] = None, year: Optional[int] = None):
+    return export_handouts_xlsx(request, q=q, lab_id=lab_id, format=format, year=year)
+
+
+@api.get("/handouts/export-xlsx")
+def handouts_export_alias_xlsx(request, q: Optional[str] = None, lab_id: Optional[int] = None, format: Optional[str] = None, year: Optional[int] = None):
+    return export_handouts_xlsx(request, q=q, lab_id=lab_id, format=format, year=year)
+
+
+@api.get("/handouts-export")
+def handouts_export_extra_alias(request, q: Optional[str] = None, lab_id: Optional[int] = None, format: Optional[str] = None, year: Optional[int] = None):
+    """Extra safety alias. Try /api/handouts-export if other aliases return 405.
+    Accepts the same query params as /handouts/export.xlsx.
+    """
+    return export_handouts_xlsx(request, q=q, lab_id=lab_id, format=format, year=year)
+
+
+@api.get("/handouts/years", response=list[int])
+def list_handout_years(request):
+    if not request.user.is_authenticated:
+        return api.create_response(request, {"detail": "Authentication required"}, status=401)
+    cache_key = f"handouts:v{_handouts_cache_version()}:years"
+    cached = _dj_cache.get(cache_key)
+    if cached:
+        return cached
+    from django.db.models.functions import ExtractYear
+    years = (
+        Handout.objects
+        .annotate(y=ExtractYear("uploaded_at"))
+        .values_list("y", flat=True)
+        .distinct()
+        .order_by("-y")
+    )
+    result = [int(y) for y in years if y]
+    _dj_cache.set(cache_key, result, 600)
+    return result

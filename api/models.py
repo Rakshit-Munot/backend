@@ -156,3 +156,32 @@ class Bill(models.Model):
 
     def __str__(self):
         return f"Bill {self.bill_no} ({self.financial_year})"
+
+# ==========================
+# Labs & Handouts
+# ==========================
+
+class Lab(models.Model):
+    name = models.CharField(max_length=120, unique=True)
+    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_labs")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Handout(models.Model):
+    lab = models.ForeignKey(Lab, on_delete=models.CASCADE, related_name="handouts")
+    title = models.CharField(max_length=200, blank=True, null=True)
+    description = models.TextField(blank=True, null=True)
+    comment = models.TextField(blank=True, null=True)
+    # For storage we use Supabase like UploadedFile; store path in file_url and sign on access
+    file_url = models.CharField(max_length=500)
+    original_filename = models.CharField(max_length=255, blank=True, null=True)
+    public_id = models.CharField(max_length=255, blank=True, null=True)
+    resource_type = models.CharField(max_length=50, blank=True, null=True)
+    uploaded_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name="handouts")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f"{self.title or self.original_filename or 'handout'} ({self.lab.name})"

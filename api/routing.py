@@ -7,4 +7,5 @@ websocket_urlpatterns = [
     path("ws/instruments/", consumers.InstrumentConsumer.as_asgi()),
     path("ws/issue-requests/", consumers.IssueRequestConsumer.as_asgi()),
     path("ws/bills/", consumers.BillConsumer.as_asgi()),
+    path("ws/handouts/", consumers.HandoutConsumer.as_asgi()),
 ]

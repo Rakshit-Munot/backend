@@ -60,3 +60,15 @@ class BillConsumer(AsyncWebsocketConsumer):
 
     async def send_bill_update(self, event):
         await self.send(text_data=json.dumps(event["data"]))
+
+
+class HandoutConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        await self.channel_layer.group_add("handout_updates", self.channel_name)
+        await self.accept()
+
+    async def disconnect(self, close_code):
+        await self.channel_layer.group_discard("handout_updates", self.channel_name)
+
+    async def send_handout_update(self, event):
+        await self.send(text_data=json.dumps(event["data"]))

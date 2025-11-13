@@ -12,7 +12,8 @@ from datetime import timedelta
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
-from .models import Item, Category, SubCategory, IssueRequest
+from .models import Item, Category, SubCategory, IssueRequest, IssueMessage
+from zoneinfo import ZoneInfo
 from .tasks import (
     async_update_item_fields,
     async_approve_issue,
@@ -28,6 +29,7 @@ from .schemas import (
     IssueRequestIn, IssueRequestSchema,
     IssueRequestListSchema, ItemSummary, UserSummary,
     ApproveRequestIn, RejectRequestIn, BulkApproveIn, BulkRejectIn,
+    IssueMessageIn, IssueMessageSchema, SubmitReturnIn,
 )
 
 api = NinjaAPI(urls_namespace="instruments")
@@ -92,6 +94,16 @@ def _ws_emit_instrument(event: str, payload: dict):
 
 
 def _ws_emit_issue(event: str, payload: dict):
+    try:
+        layer = get_channel_layer()
+        async_to_sync(layer.group_send)(
+            "issue_request_updates",
+            {"type": "send_issue_update", "data": {"event": event, "payload": payload}},
+        )
+    except Exception:
+        pass
+    
+def _ws_emit_message(event: str, payload: dict):
     try:
         layer = get_channel_layer()
         async_to_sync(layer.group_send)(
@@ -621,6 +633,8 @@ def create_issue_request(request, data: IssueRequestIn):
             "quantity": issue_request.quantity,
             "status": issue_request.status,
             "created_at": issue_request.created_at.isoformat() if hasattr(issue_request, "created_at") else None,
+            "submission_status": issue_request.submission_status,
+            "submitted_at": issue_request.submitted_at.isoformat() if getattr(issue_request, "submitted_at", None) else None,
         })
     except Exception:
         pass
@@ -655,6 +669,8 @@ def list_issue_requests(request, status: Optional[str] = None, scope: Optional[s
             "approved_at": r.approved_at,
             "return_by": r.return_by,
             "remarks": r.remarks,
+            "submission_status": getattr(r, "submission_status", None),
+            "submitted_at": getattr(r, "submitted_at", None),
         })
     return results
 
@@ -900,3 +916,178 @@ def bulk_reject(request, data: BulkRejectIn):
     except Exception:
         pass
     return results
+
+
+# ---------------------------
+# MESSAGES AND RETURNS
+# ---------------------------
+@api.get("/issue-requests/{request_id}/messages", response=list[IssueMessageSchema])
+def list_issue_messages(request, request_id: int):
+    req = get_object_or_404(IssueRequest, id=request_id)
+    msgs = IssueMessage.objects.filter(issue_request_id=req.id).order_by("-created_at")
+    results = []
+    for m in msgs:
+        results.append({
+            "id": m.id,
+            "issue_request_id": req.id,
+            "msg_type": m.msg_type,
+            "text": m.text,
+            "created_at": m.created_at,
+            "creator_id": m.creator_id,
+        })
+    return results
+
+
+@api.post("/issue-requests/{request_id}/messages", response=IssueMessageSchema)
+def create_issue_message(request, request_id: int, data: IssueMessageIn):
+    req = get_object_or_404(IssueRequest, id=request_id)
+    msg = IssueMessage.objects.create(
+        issue_request=req,
+        msg_type="admin",
+        text=(data.text or ""),
+        creator=getattr(request, "user", None) if getattr(request, "user", None) and getattr(request.user, "is_authenticated", False) else None,
+    )
+    # Emit WS event
+    try:
+        _ws_emit_message("issue_request.message", {
+            "id": msg.id,
+            "issue_request_id": req.id,
+            "msg_type": msg.msg_type,
+            "text": msg.text,
+            "created_at": msg.created_at.isoformat(),
+            "creator_id": msg.creator_id,
+        })
+    except Exception:
+        pass
+    # Optionally enqueue email notification (HTML sending remains disabled in tasks)
+    try:
+        from .tasks import send_issue_message_email
+        if data.notify_email:
+            send_issue_message_email.delay(req.id, msg.id)
+    except Exception:
+        pass
+    return {
+        "id": msg.id,
+        "issue_request_id": req.id,
+        "msg_type": msg.msg_type,
+        "text": msg.text,
+        "created_at": msg.created_at,
+        "creator_id": msg.creator_id,
+    }
+
+
+@api.post("/issue-requests/{request_id}/submit", response=IssueRequestSchema)
+def submit_return(request, request_id: int, payload: SubmitReturnIn):
+    req = get_object_or_404(IssueRequest.objects.select_related("item"), id=request_id)
+    # Mark submitted
+    try:
+        req.submission_status = "submitted"
+        req.submitted_at = timezone.now()
+        # Build note text: for consumables default to explicit consumed wording
+        note_text = None
+        try:
+            if payload and payload.message:
+                note_text = payload.message
+            else:
+                # Build default note with IST timestamp
+                try:
+                    ist_now = timezone.localtime(timezone.now(), ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p IST")
+                except Exception:
+                    ist_now = timezone.now().strftime("%Y-%m-%d %H:%M")
+                if getattr(req.item, "is_consumable", False):
+                    note_text = f"Consumable submitted at {ist_now}"
+                else:
+                    note_text = f"Submitted at {ist_now}"
+        except Exception:
+            try:
+                ist_now = timezone.localtime(timezone.now(), ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p IST")
+            except Exception:
+                ist_now = timezone.now().strftime("%Y-%m-%d %H:%M")
+            note_text = (payload.message if payload else None) or f"Submitted at {ist_now}"
+
+        if note_text:
+            req.remarks = (req.remarks or "").strip()
+            if req.remarks:
+                req.remarks += f"\nSubmission note: {note_text}"
+            else:
+                req.remarks = f"Submission note: {note_text}"
+        req.save(update_fields=["submission_status", "submitted_at", "remarks"])
+    except Exception:
+        pass
+    # Create a message entry
+    msg = None
+    try:
+        msg = IssueMessage.objects.create(
+            issue_request=req,
+            msg_type="system",
+            text=note_text or "Item submitted",
+        )
+        _ws_emit_message("issue_request.message", {
+            "id": msg.id,
+            "issue_request_id": req.id,
+            "msg_type": msg.msg_type,
+            "text": msg.text,
+            "created_at": msg.created_at.isoformat(),
+            "creator_id": msg.creator_id,
+        })
+    except Exception:
+        pass
+    # Optionally notify via email
+    try:
+        from .tasks import send_issue_message_email
+        if payload and payload.notify_email and msg is not None:
+            send_issue_message_email.delay(req.id, msg.id)
+    except Exception:
+        pass
+    # Notify request update for UI without refetch
+    try:
+        _ws_emit_issue("issue_request.updated", {
+            "id": req.id,
+            "status": req.status,
+            "approved_at": req.approved_at.isoformat() if req.approved_at else None,
+            "return_by": req.return_by.isoformat() if req.return_by else None,
+            "submission_status": getattr(req, "submission_status", None),
+            "submitted_at": getattr(req, "submitted_at", None).isoformat() if getattr(req, "submitted_at", None) else None,
+        })
+    except Exception:
+        pass
+
+    # Refresh item snapshot and notify listeners so availability updates in UI
+    try:
+        item = req.item
+        cache.set(
+            f"instruments:item:{item.id}",
+            {
+                "id": item.id,
+                "name": item.name,
+                "category_id": item.category_id,
+                "sub_category_id": item.sub_category_id,
+                "quantity": item.quantity,
+                "is_consumable": item.is_consumable,
+                "location": item.location,
+                "is_available": item.is_available,
+                "min_issue_limit": item.min_issue_limit,
+                "max_issue_limit": item.max_issue_limit,
+                "description": item.description,
+                "available_quantity": getattr(item, "available_quantity", item.quantity),
+            },
+            timeout=600,
+        )
+        _cache_invalidate_index(ITEMS_INDEX_KEY)
+        _ws_emit_instrument("item.updated", {
+            "id": item.id,
+            "name": item.name,
+            "category_id": item.category_id,
+            "sub_category_id": item.sub_category_id,
+            "quantity": item.quantity,
+            "is_consumable": item.is_consumable,
+            "location": item.location,
+            "is_available": item.is_available,
+            "min_issue_limit": item.min_issue_limit,
+            "max_issue_limit": item.max_issue_limit,
+            "description": item.description,
+            "available_quantity": getattr(item, "available_quantity", item.quantity),
+        })
+    except Exception:
+        pass
+    return req

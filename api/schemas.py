@@ -7,6 +7,7 @@ from pydantic import EmailStr, constr , BaseModel
 from typing import Annotated, Literal, Optional, List, Dict
 from .models import CustomUser
 from .models import UploadedFile as UploadedFileModel
+from .models import Lab, Handout
 import datetime
 
 # ✅ Output schema for uploaded files
@@ -137,6 +138,29 @@ class BillOut(Schema):
 
 class PaginatedBills(Schema):
     items: List[BillOut]
+    page: int
+    total_pages: int
+    total: int
+
+# ==========================
+# Labs & Handouts
+# ==========================
+class LabOut(Schema):
+    id: int
+    name: str
+    created_at: datetime.datetime
+
+class HandoutOut(Schema):
+    id: int
+    title: Optional[str] = None
+    description: Optional[str] = None
+    comment: Optional[str] = None
+    file_url: str
+    original_filename: Optional[str] = None
+    uploaded_at: datetime.datetime
+
+class PaginatedHandouts(Schema):
+    items: List[HandoutOut]
     page: int
     total_pages: int
     total: int

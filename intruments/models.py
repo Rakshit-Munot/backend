@@ -45,14 +45,14 @@ class Item(models.Model):
     @property
     def available_quantity(self):
         """
-        - Non-consumable: available = quantity - approved outstanding - pending (reserve pending)
+        - Non-consumable: available = quantity - approved outstanding (not yet submitted) - pending (reserve pending)
         - Consumable: available = current stock (quantity is decremented on pending request to hard-lock)
         """
         if not self.is_available:
             return 0
         if self.is_consumable:
             return self.quantity
-        issued_qty = IssueRequest.objects.filter(item=self, status='approved').aggregate(
+        issued_qty = IssueRequest.objects.filter(item=self, status='approved').exclude(submission_status='submitted').aggregate(
             total=models.Sum('quantity')
         )['total'] or 0
         pending_qty = IssueRequest.objects.filter(item=self, status='pending').aggregate(
@@ -77,6 +77,15 @@ class IssueRequest(models.Model):
     approved_at = models.DateTimeField(blank=True, null=True)
     return_by = models.DateTimeField(blank=True, null=True)
     remarks = models.TextField(blank=True, null=True)
+
+    # Return/submission tracking
+    SUBMISSION_CHOICES = [
+        ("not_required", "Not Required"),  # for consumables
+        ("pending", "Pending"),            # for non-consumables until submitted
+        ("submitted", "Submitted"),        # when returned/submitted by student
+    ]
+    submission_status = models.CharField(max_length=20, choices=SUBMISSION_CHOICES, default="pending")
+    submitted_at = models.DateTimeField(blank=True, null=True)
 
     def approve(self, no_of_days=7):
         if self.status != 'pending':
@@ -107,3 +116,23 @@ class IssueRequest(models.Model):
 
     def __str__(self):
         return f"{self.user} -> {self.item.name} ({self.quantity}) | Status: {self.status}"
+
+
+class IssueMessage(models.Model):
+    TYPE_CHOICES = [
+        ("admin", "Admin"),
+        ("system", "System"),
+    ]
+
+    issue_request = models.ForeignKey(IssueRequest, on_delete=models.CASCADE, related_name="messages")
+    msg_type = models.CharField(max_length=10, choices=TYPE_CHOICES, default="admin")
+    text = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    creator = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        who = "system" if self.msg_type == "system" else (getattr(self.creator, "username", None) or "admin")
+        return f"[{self.msg_type}] {who}: {self.text[:30]}" 

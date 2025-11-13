@@ -5,6 +5,8 @@ from datetime import timedelta, datetime
 import logging
 
 from celery import shared_task
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 from django.core.cache import cache
 from django.core.mail import send_mail
 from django.db import transaction
@@ -15,7 +17,7 @@ from zoneinfo import ZoneInfo
 from collections import defaultdict
 from django.utils.html import escape
 
-from .models import IssueRequest, Item, Category, SubCategory
+from .models import IssueRequest, Item, Category, SubCategory, IssueMessage
 
 logger = logging.getLogger(__name__)
 
@@ -421,11 +423,50 @@ def async_approve_issue(issue_id: int, no_of_days: int = 7, send_email: bool = T
                     issue_request.return_by = issue_request.approved_at + timedelta(days=no_of_days)
             else:
                 issue_request.return_by = issue_request.approved_at + timedelta(days=no_of_days)
+            # Set submission_status based on item type
+            try:
+                if item.is_consumable:
+                    # Auto-submit consumables upon approval
+                    issue_request.submission_status = "submitted"
+                    issue_request.submitted_at = issue_request.approved_at
+                    # Ensure remark reflects consumption for clarity in UI
+                    if not getattr(issue_request, "remarks", None):
+                        issue_request.remarks = "Consumed"
+                else:
+                    issue_request.submission_status = "pending"
+            except Exception:
+                pass
             issue_request.save()
 
         # Update per-item cache
         snapshot = _serialize_item_for_cache(item)
         _cache_item_snapshot(snapshot)
+
+        # Emit WS event for immediate UI update with full payload
+        try:
+            layer = get_channel_layer()
+            async_to_sync(layer.group_send)(
+                "issue_request_updates",
+                {
+                    "type": "send_issue_update",
+                    "data": {
+                        "event": "issue_request.updated",
+                        "payload": {
+                            "id": issue_request.id,
+                            "status": issue_request.status,
+                            "approved_at": issue_request.approved_at.isoformat() if issue_request.approved_at else None,
+                            "return_by": issue_request.return_by.isoformat() if issue_request.return_by else None,
+                            "submission_status": getattr(issue_request, "submission_status", None),
+                            "submitted_at": issue_request.submitted_at.isoformat() if getattr(issue_request, "submitted_at", None) else None,
+                            "remarks": getattr(issue_request, "remarks", None),
+                        },
+                    },
+                },
+            )
+        except Exception:
+            logger.exception("WS emit issue_request.updated failed")
+
+        # No auto system message for consumables to avoid misclassification noise
 
         # Schedule reminders (disabled when REMINDER_EMAILS_ENABLED is False)
         if REMINDER_EMAILS_ENABLED:
@@ -435,6 +476,13 @@ def async_approve_issue(issue_id: int, no_of_days: int = 7, send_email: bool = T
                 send_reminder_email.apply_async((issue_request.id, "1 day before"), eta=one_day_before)
             if one_hour_before > timezone.now():
                 send_reminder_email.apply_async((issue_request.id, "1 hour before"), eta=one_hour_before)
+
+        # Schedule a system message at deadline only if not already submitted
+        try:
+            if issue_request.return_by and getattr(issue_request, "submission_status", None) != "submitted":
+                create_deadline_system_message.apply_async((issue_request.id,), eta=issue_request.return_by)
+        except Exception:
+            logger.exception("Failed to schedule deadline system message")
 
         # Send approval email immediately
         try:
@@ -474,6 +522,29 @@ def async_reject_issue(issue_id: int, reason: Optional[str] = "", send_email: bo
         item = issue_request.item
         snapshot = _serialize_item_for_cache(item)
         _cache_item_snapshot(snapshot)
+
+        # Emit WS event for immediate UI update
+        try:
+            layer = get_channel_layer()
+            async_to_sync(layer.group_send)(
+                "issue_request_updates",
+                {
+                    "type": "send_issue_update",
+                    "data": {
+                        "event": "issue_request.updated",
+                        "payload": {
+                            "id": issue_request.id,
+                            "status": issue_request.status,
+                            "approved_at": issue_request.approved_at.isoformat() if issue_request.approved_at else None,
+                            "return_by": issue_request.return_by.isoformat() if issue_request.return_by else None,
+                            "submission_status": getattr(issue_request, "submission_status", None),
+                            "submitted_at": issue_request.submitted_at.isoformat() if getattr(issue_request, "submitted_at", None) else None,
+                        },
+                    },
+                },
+            )
+        except Exception:
+            logger.exception("WS emit issue_request.updated (reject) failed")
 
         # Send rejection email
         try:
@@ -679,3 +750,88 @@ def send_bulk_issue_rejected_email(self, request_ids: list[int]):
             # logger.info(f"[Task {self.request.id}] Sent consolidated rejected email to {email} ({len(items)} items)")
     except Exception as e:
         logger.exception("send_bulk_issue_rejected_email failed: %s", e)
+
+
+# ---------------------------
+# Message email + system message generation
+# ---------------------------
+@shared_task(bind=True)
+def send_issue_message_email(self, request_id: int, message_id: int):
+    """Send an email notification for an issue message to the request owner."""
+    try:
+        req = IssueRequest.objects.select_related("user", "item").get(id=request_id)
+        msg = IssueMessage.objects.get(id=message_id, issue_request_id=request_id)
+        user_email = getattr(req.user, "email", None)
+        if not user_email:
+            return
+
+        subject = f"Update on your instrument request (#{request_id})"
+        body = (
+            f"Hello,\n\n"
+            f"There is a new message on your instrument request for '{getattr(req.item, 'name', 'Instrument')}'.\n\n"
+            f"Message: {msg.text}\n\n"
+            f"Regards,\nLab Team"
+        )
+        # HTML body
+        html_body = _wrap_html_email(
+            "New Message on Your Request",
+            """
+            <p>Hello,</p>
+            <p>There is a new message on your instrument request for <strong>{item}</strong>.</p>
+            <blockquote style="margin:12px 0; padding:12px; background:#f9fafb; border-left:4px solid #6366f1;">{text}</blockquote>
+            <p>Regards,<br/>Lab Team</p>
+            """.format(item=escape(getattr(req.item, 'name', 'Instrument')), text=escape(msg.text or ""))
+        )
+        # Disabled actual sending per policy
+        # send_mail(subject, body, getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"), [user_email], html_message=html_body)
+    except Exception:
+        logger.exception("send_issue_message_email failed")
+
+
+@shared_task(bind=True)
+def create_deadline_system_message(self, request_id: int):
+    """Create a system message at the return deadline and optionally email the user."""
+    try:
+        req = IssueRequest.objects.select_related("user", "item").get(id=request_id)
+        # Safety checks to avoid premature or duplicate messages due to timezone/clock skew
+        now = timezone.now()
+        rb = getattr(req, "return_by", None)
+        sub_status = getattr(req, "submission_status", None)
+        # If already submitted, skip
+        if sub_status == "submitted":
+            return
+        # If return_by exists and is still in the future (allow 30s skew), reschedule instead of sending now
+        if rb and (now + timedelta(seconds=30)) < rb:
+            try:
+                create_deadline_system_message.apply_async((req.id,), eta=rb)
+            except Exception:
+                logger.exception("Reschedule deadline system message failed")
+            return
+
+        text = "Return deadline reached. Please return the instrument as soon as possible."
+        msg = IssueMessage.objects.create(issue_request=req, msg_type="system", text=text)
+        # WS emission will be handled on API side typically, but we can also notiy here via channel layer if needed.
+        try:
+            from asgiref.sync import async_to_sync
+            from channels.layers import get_channel_layer
+            layer = get_channel_layer()
+            async_to_sync(layer.group_send)(
+                "issue_request_updates",
+                {"type": "send_issue_update", "data": {"event": "issue_request.message", "payload": {
+                    "id": msg.id,
+                    "issue_request_id": req.id,
+                    "msg_type": msg.msg_type,
+                    "text": msg.text,
+                    "created_at": msg.created_at.isoformat(),
+                    "creator_id": msg.creator_id,
+                }}}
+            )
+        except Exception:
+            pass
+        # Optionally email
+        try:
+            send_issue_message_email.delay(req.id, msg.id)
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("create_deadline_system_message failed")
