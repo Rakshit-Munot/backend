@@ -41,6 +41,8 @@ User = get_user_model()
 ITEMS_INDEX_KEY = "instruments:items:keys"
 CATEGORIES_INDEX_KEY = "instruments:categories:keys"
 SUBCATS_INDEX_KEY = "instruments:subcategories:keys"
+MESSAGES_CACHE_TIMEOUT = 300  # seconds
+MESSAGES_CACHE_MAX = 200
 
 # ---------------------------
 # Cache helpers
@@ -79,6 +81,72 @@ def _categories_cache_key() -> str:
 def _subcats_cache_key(category_id: int) -> str:
     return f"instruments:subcategories:category={category_id}"
 
+def _messages_cache_key(request_id: int) -> str:
+    return f"instruments:issue_messages:{request_id}"
+
+# ---------------------------
+# Shaping helpers
+# ---------------------------
+def _is_admin(request) -> bool:
+    try:
+        user = getattr(request, "user", None)
+        return bool(user and (getattr(user, "is_staff", False) or getattr(user, "is_superuser", False)))
+    except Exception:
+        return False
+
+def _shape_item_for_user(request, item_or_snapshot) -> dict:
+    """Return a plain dict for ItemSchema, masking sensitive fields for non-admins."""
+    try:
+        if isinstance(item_or_snapshot, dict):
+            src = item_or_snapshot
+            data = {
+                "id": src.get("id"),
+                "name": src.get("name", ""),
+                "category_id": src.get("category_id"),
+                "sub_category_id": src.get("sub_category_id"),
+                "quantity": src.get("quantity", 0),
+                "is_consumable": bool(src.get("is_consumable", False)),
+                "location": src.get("location", ""),
+                "is_available": bool(src.get("is_available", True)),
+                "min_issue_limit": src.get("min_issue_limit", 1),
+                "max_issue_limit": src.get("max_issue_limit", src.get("min_issue_limit", 1)),
+                "description": src.get("description", ""),
+                "available_quantity": src.get("available_quantity", src.get("quantity", 0)),
+            }
+        else:
+            it = item_or_snapshot
+            data = {
+                "id": it.id,
+                "name": it.name,
+                "category_id": it.category_id,
+                "sub_category_id": it.sub_category_id,
+                "quantity": it.quantity,
+                "is_consumable": bool(getattr(it, "is_consumable", False)),
+                "location": getattr(it, "location", "") or "",
+                "is_available": bool(getattr(it, "is_available", True)),
+                "min_issue_limit": getattr(it, "min_issue_limit", 1),
+                "max_issue_limit": getattr(it, "max_issue_limit", getattr(it, "min_issue_limit", 1)),
+                "description": getattr(it, "description", "") or "",
+                "available_quantity": getattr(it, "available_quantity", getattr(it, "quantity", 0)),
+            }
+        # Mask location for non-admin users
+        if not _is_admin(request):
+            data["location"] = ""
+        return data
+    except Exception:
+        # Fallback minimal shape
+        try:
+            it = item_or_snapshot
+            base = {"id": getattr(it, "id", None), "name": getattr(it, "name", ""), "category_id": getattr(it, "category_id", None), "sub_category_id": getattr(it, "sub_category_id", None), "quantity": getattr(it, "quantity", 0), "is_consumable": bool(getattr(it, "is_consumable", False)), "is_available": bool(getattr(it, "is_available", True)), "min_issue_limit": getattr(it, "min_issue_limit", 1), "max_issue_limit": getattr(it, "max_issue_limit", getattr(it, "min_issue_limit", 1)), "description": getattr(it, "description", "")}
+        except Exception:
+            base = {"id": None, "name": "", "category_id": None, "sub_category_id": None, "quantity": 0, "is_consumable": False, "is_available": True, "min_issue_limit": 1, "max_issue_limit": 1, "description": ""}
+        base["available_quantity"] = base.get("quantity", 0)
+        if not _is_admin(request):
+            base["location"] = ""
+        else:
+            base["location"] = getattr(item_or_snapshot, "location", "") if not isinstance(item_or_snapshot, dict) else item_or_snapshot.get("location", "")
+        return base
+
 # ---------------------------
 # WebSocket helpers
 # ---------------------------
@@ -112,6 +180,27 @@ def _ws_emit_message(event: str, payload: dict):
         )
     except Exception:
         pass
+
+# ---------------------------
+# User display helper
+# ---------------------------
+def _user_display(user) -> str:
+    try:
+        if not user:
+            return ""
+        name = ""
+        try:
+            # Prefer full name if available
+            full = getattr(user, "get_full_name", None)
+            if callable(full):
+                name = (full() or "").strip()
+        except Exception:
+            name = ""
+        if not name:
+            name = (getattr(user, "username", None) or getattr(user, "email", None) or "").strip()
+        return name or "Admin"
+    except Exception:
+        return "Admin"
 
 # ---------------------------
 # Date helpers
@@ -165,7 +254,7 @@ def get_item(request, item_id: int):
     cache_key = f"instruments:item:{item_id}"
     cached = cache.get(cache_key)
     if cached is not None:
-        return cached
+        return _shape_item_for_user(request, cached)
 
     try:
         item = Item.objects.select_related("category", "sub_category").get(id=item_id)
@@ -185,7 +274,7 @@ def get_item(request, item_id: int):
             "available_quantity": item.available_quantity,
         }
         cache.set(cache_key, snapshot, timeout=600)
-        return item
+        return _shape_item_for_user(request, snapshot)
     except Item.DoesNotExist:
         return api.create_response(request, {"detail": "Item not found"}, status=404)
 
@@ -236,7 +325,7 @@ def update_item(request, item_id: int, data: ItemIn):
     _cache_invalidate_index(ITEMS_INDEX_KEY)
     # Notify listeners
     _ws_emit_instrument("item.updated", snapshot)
-    return snapshot
+    return _shape_item_for_user(request, snapshot)
 
 @api.delete("/items/{item_id}")
 def delete_item(request, item_id: int):
@@ -318,14 +407,17 @@ def issue_item(request, item_id: int, data: ItemIssueRequest):
         "description": item.description,
         "available_quantity": item.quantity,
     })
-    return item
+    return _shape_item_for_user(request, item)
 
 @api.get("/items", response=list[ItemSchema])
 def list_items(request, category: Optional[int] = None, subcategory: Optional[int] = None):
     cache_key = _items_cache_key(category, subcategory)
     items = _cache_get(cache_key)
     if items is not None:
-        return items
+        try:
+            return [_shape_item_for_user(request, it) for it in items]
+        except Exception:
+            return items
 
     qs = Item.objects.select_related("category", "sub_category").all()
     if category is not None:
@@ -335,7 +427,7 @@ def list_items(request, category: Optional[int] = None, subcategory: Optional[in
 
     items = list(qs)
     _cache_set_indexed(cache_key, items, timeout=300, index_key=ITEMS_INDEX_KEY)
-    return items
+    return [_shape_item_for_user(request, it) for it in items]
 
 @api.post("/items", response=ItemSchema)
 def create_item(request, item: ItemIn):
@@ -397,7 +489,7 @@ def create_item(request, item: ItemIn):
         "description": new_item.description,
         "available_quantity": new_item.available_quantity,
     })
-    return new_item
+    return _shape_item_for_user(request, new_item)
 
 # ---------------------------
 # CATEGORY ROUTES
@@ -641,10 +733,39 @@ def create_issue_request(request, data: IssueRequestIn):
     return issue_request
 
 @api.get("/issue-requests/", response=list[IssueRequestListSchema])
-def list_issue_requests(request, status: Optional[str] = None, scope: Optional[str] = None):
+def list_issue_requests(
+    request,
+    status: Optional[str] = None,
+    scope: Optional[str] = None,
+    submission_status: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    order: Optional[str] = None,
+    user_id: Optional[int] = None,
+    user_email: Optional[str] = None,
+    roll_number: Optional[str] = None,
+    sort: Optional[str] = None,
+):
     qs = IssueRequest.objects.select_related("item", "user").all()
     if status:
         qs = qs.filter(status=status)
+    if submission_status:
+        qs = qs.filter(submission_status=submission_status)
+    # Filter by specific student (any combination)
+    try:
+        if user_id is not None:
+            qs = qs.filter(user_id=int(user_id))
+    except Exception:
+        pass
+    try:
+        if user_email:
+            qs = qs.filter(user__email__iexact=user_email.strip())
+    except Exception:
+        pass
+    try:
+        if roll_number:
+            qs = qs.filter(user__student_profile__roll_number__iexact=roll_number.strip())
+    except Exception:
+        pass
     # Scoping: scope=all to fetch all, scope=mine to fetch only current user's requests.
     # Default behavior: non-staff users are scoped to their own requests.
     try:
@@ -657,6 +778,41 @@ def list_issue_requests(request, status: Optional[str] = None, scope: Optional[s
                 qs = qs.filter(user_id=request.user.id)
     except Exception:
         pass
+    # Sorting
+    try:
+        # Support legacy/simple toggles: sort=oldest|newest mapped to a field inferred from context
+        inferred_sort_by = None
+        inferred_order = None
+        if (sort or "").strip().lower() in ("oldest", "newest") and not sort_by:
+            sflag = (sort or "").strip().lower()
+            # Choose field based on active tab
+            if (submission_status or "").lower() == "submitted":
+                inferred_sort_by = "submitted"
+            elif (status or "").lower() == "approved":
+                inferred_sort_by = "approved"
+            else:
+                inferred_sort_by = "created"
+            inferred_order = ("asc" if sflag == "oldest" else "desc")
+
+        sort_key = (sort_by or inferred_sort_by or "").strip().lower()
+        ord_dir = (order or inferred_order or "desc").strip().lower()
+        desc = (ord_dir != "asc")
+        field_map = {
+            "submitted": "submitted_at",
+            "approved": "approved_at",
+            "created": "created_at",
+            "student": "user__username",
+            "item": "item__name",
+        }
+        if sort_key in field_map:
+            fld = field_map[sort_key]
+            qs = qs.order_by(("-" if desc else "") + fld)
+        else:
+            # Stable default: newest first
+            qs = qs.order_by("-created_at")
+    except Exception:
+        pass
+
     results = []
     for r in qs:
         results.append({
@@ -818,6 +974,8 @@ def bulk_approve(request, data: BulkApproveIn):
             rb_iso_common = None
             rb_dt_common = None
 
+    optimistic_results = []
+    now_ts = timezone.now()
     for r in qs:
         # With hard-locks, consumable stock already reserved at creation
         # queue task
@@ -848,6 +1006,76 @@ def bulk_approve(request, data: BulkApproveIn):
         # Suppress per-item emails in bulk mode; we'll send a consolidated mail per user
         async_approve_issue.delay(r.id, days, send_email=False, return_by_iso=rb_iso_common)
         results.append(r)
+
+        # Build optimistic result for instant UI update (do not persist here)
+        try:
+            approved_at = now_ts
+            if rb_dt_common:
+                ret_by = rb_dt_common
+            elif data.return_by:
+                rb_local = data.return_by
+                if timezone.is_naive(rb_local):
+                    rb_local = timezone.make_aware(rb_local, timezone.get_current_timezone())
+                ret_by = _clamp_to_eod(rb_local)
+            else:
+                ret_by = approved_at + timedelta(days=days)
+
+            remarks_val = data.remarks if getattr(data, 'remarks', None) else (getattr(r, 'remarks', None) or "").strip() or None
+            sub_status = None
+            submitted_at = None
+            try:
+                if r.item and getattr(r.item, 'is_consumable', False):
+                    sub_status = "submitted"
+                    submitted_at = approved_at
+                    # Compose remarks: Consumed + Submitted at line
+                    try:
+                        ts_txt = timezone.localtime(approved_at, ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p IST")
+                    except Exception:
+                        ts_txt = approved_at.isoformat()
+                    line1 = "Consumed"
+                    line2 = f"Submitted at {ts_txt}"
+                    cur = (remarks_val or "").strip()
+                    if not cur:
+                        remarks_val = f"{line1}\n{line2}"
+                    else:
+                        add_lines = []
+                        if "Consumed" not in cur:
+                            add_lines.append(line1)
+                        if "Submitted at" not in cur:
+                            add_lines.append(line2)
+                        if add_lines:
+                            remarks_val = cur + "\n" + "\n".join(add_lines)
+            except Exception:
+                pass
+
+            optimistic_results.append({
+                "id": r.id,
+                "item_id": r.item_id,
+                "user_id": r.user_id,
+                "quantity": r.quantity,
+                "status": "approved",
+                "created_at": r.created_at,
+                "approved_at": approved_at,
+                "return_by": ret_by,
+                "remarks": remarks_val,
+                "submission_status": sub_status,
+                "submitted_at": submitted_at,
+            })
+        except Exception:
+            # Fallback to raw object if optimistic shaping fails
+            optimistic_results.append({
+                "id": r.id,
+                "item_id": r.item_id,
+                "user_id": r.user_id,
+                "quantity": r.quantity,
+                "status": r.status,
+                "created_at": r.created_at,
+                "approved_at": r.approved_at,
+                "return_by": r.return_by,
+                "remarks": getattr(r, 'remarks', None),
+                "submission_status": getattr(r, 'submission_status', None),
+                "submitted_at": getattr(r, 'submitted_at', None),
+            })
     _cache_invalidate_index(ITEMS_INDEX_KEY)
     try:
         _ws_emit_issue("issue_request.bulk_approved", {"ids": [r.id for r in results]})
@@ -860,7 +1088,8 @@ def bulk_approve(request, data: BulkApproveIn):
             send_bulk_issue_approved_email.apply_async((consolidated_ids, getattr(data, 'return_days', None), rb_iso_common), countdown=5)
     except Exception:
         pass
-    return results
+    # Return optimistic payload for instant UI; actual DB updates are async
+    return optimistic_results
 
 
 @api.post("/issue-requests/bulk-reject", response=list[IssueRequestSchema])
@@ -923,18 +1152,39 @@ def bulk_reject(request, data: BulkRejectIn):
 # ---------------------------
 @api.get("/issue-requests/{request_id}/messages", response=list[IssueMessageSchema])
 def list_issue_messages(request, request_id: int):
-    req = get_object_or_404(IssueRequest, id=request_id)
-    msgs = IssueMessage.objects.filter(issue_request_id=req.id).order_by("-created_at")
+    # Try Redis cache first without hitting DB
+    ck = _messages_cache_key(request_id)
+    try:
+        cached = cache.get(ck)
+        if cached is not None:
+            return cached
+    except Exception:
+        cached = None
+
+    # Fallback to DB; validate that request exists via queryset filtering
+    # and select creator to avoid N+1 lookups when building sender_name
+    get_object_or_404(IssueRequest, id=request_id)
+    msgs = (
+        IssueMessage.objects
+        .filter(issue_request_id=request_id)
+        .select_related("creator")
+        .order_by("-created_at")
+    )
     results = []
     for m in msgs:
         results.append({
             "id": m.id,
-            "issue_request_id": req.id,
+            "issue_request_id": request_id,
             "msg_type": m.msg_type,
             "text": m.text,
             "created_at": m.created_at,
             "creator_id": m.creator_id,
+            "sender_name": ("System" if getattr(m, "msg_type", "") == "system" else _user_display(getattr(m, "creator", None))),
         })
+    try:
+        cache.set(ck, results, timeout=MESSAGES_CACHE_TIMEOUT)
+    except Exception:
+        pass
     return results
 
 
@@ -956,7 +1206,30 @@ def create_issue_message(request, request_id: int, data: IssueMessageIn):
             "text": msg.text,
             "created_at": msg.created_at.isoformat(),
             "creator_id": msg.creator_id,
+            "sender_name": _user_display(getattr(msg, "creator", None)),
         })
+    except Exception:
+        pass
+    # Update Redis cache
+    try:
+        ck = _messages_cache_key(req.id)
+        entry = {
+            "id": msg.id,
+            "issue_request_id": req.id,
+            "msg_type": msg.msg_type,
+            "text": msg.text,
+            "created_at": msg.created_at,
+            "creator_id": msg.creator_id,
+            "sender_name": _user_display(getattr(msg, "creator", None)),
+        }
+        lst = cache.get(ck)
+        if isinstance(lst, list):
+            lst = [entry] + lst
+            if len(lst) > MESSAGES_CACHE_MAX:
+                lst = lst[:MESSAGES_CACHE_MAX]
+            cache.set(ck, lst, timeout=MESSAGES_CACHE_TIMEOUT)
+        else:
+            cache.set(ck, [entry], timeout=MESSAGES_CACHE_TIMEOUT)
     except Exception:
         pass
     # Optionally enqueue email notification (HTML sending remains disabled in tasks)
@@ -1029,7 +1302,30 @@ def submit_return(request, request_id: int, payload: SubmitReturnIn):
             "text": msg.text,
             "created_at": msg.created_at.isoformat(),
             "creator_id": msg.creator_id,
+            "sender_name": "System",
         })
+        # Update Redis cache
+        try:
+            ck = _messages_cache_key(req.id)
+            entry = {
+                "id": msg.id,
+                "issue_request_id": req.id,
+                "msg_type": msg.msg_type,
+                "text": msg.text,
+                "created_at": msg.created_at,
+                "creator_id": msg.creator_id,
+                "sender_name": "System",
+            }
+            lst = cache.get(ck)
+            if isinstance(lst, list):
+                lst = [entry] + lst
+                if len(lst) > MESSAGES_CACHE_MAX:
+                    lst = lst[:MESSAGES_CACHE_MAX]
+                cache.set(ck, lst, timeout=MESSAGES_CACHE_TIMEOUT)
+            else:
+                cache.set(ck, [entry], timeout=MESSAGES_CACHE_TIMEOUT)
+        except Exception:
+            pass
     except Exception:
         pass
     # Optionally notify via email
@@ -1090,4 +1386,16 @@ def submit_return(request, request_id: int, payload: SubmitReturnIn):
         })
     except Exception:
         pass
-    return req
+    return {
+        "id": req.id,
+        "item_id": req.item_id,
+        "user_id": req.user_id,
+        "quantity": req.quantity,
+        "status": req.status,
+        "created_at": req.created_at,
+        "approved_at": req.approved_at,
+        "return_by": req.return_by,
+        "remarks": req.remarks,
+        "submission_status": getattr(req, "submission_status", None),
+        "submitted_at": getattr(req, "submitted_at", None),
+    }

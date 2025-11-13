@@ -97,6 +97,7 @@ class CustomUserAdmin(UserAdmin):
         "username",
         "email",
         "role",
+        "get_roll_number",
         "get_branch",
         "get_year",
         "get_department",
@@ -104,9 +105,16 @@ class CustomUserAdmin(UserAdmin):
         "is_active",
         "is_staff",
     )
-    list_filter = ("role", "is_staff")
+    list_filter = (
+        "role",
+        "is_staff",
+        ("student_profile__branch"),
+        ("student_profile__year"),
+        ("student_profile__lab_day"),
+    )
     search_fields = ("username", "email")
-    ordering = ("email",)
+    # Default order: Year → Branch → Email for student listings
+    ordering = ("student_profile__year", "student_profile__branch", "email")
 
     fieldsets = (
         (None, {"fields": ("username", "email", "password", "role")}),
@@ -169,17 +177,26 @@ class CustomUserAdmin(UserAdmin):
     # ------------------------
     # Display profile info in list
     # ------------------------
+    def get_roll_number(self, obj):
+        if obj.role == "student" and hasattr(obj, "student_profile"):
+            return obj.student_profile.roll_number
+        return "-"
+    get_roll_number.short_description = "Roll No."
+    get_roll_number.admin_order_field = "student_profile__roll_number"
+
     def get_branch(self, obj):
         if obj.role == "student" and hasattr(obj, "student_profile"):
             return obj.student_profile.branch
         return "-"
     get_branch.short_description = "Branch"
+    get_branch.admin_order_field = "student_profile__branch"
 
     def get_year(self, obj):
         if obj.role == "student" and hasattr(obj, "student_profile"):
             return obj.student_profile.year
         return "-"
     get_year.short_description = "Year"
+    get_year.admin_order_field = "student_profile__year"
 
     def get_lab_days(self, obj):
         if obj.role == "student" and hasattr(obj, "student_profile"):
@@ -190,6 +207,7 @@ class CustomUserAdmin(UserAdmin):
             return ", ".join(day.title() for day in obj.staff_profile.lab_days)
         return "-"
     get_lab_days.short_description = "Lab Days"
+    get_lab_days.admin_order_field = "student_profile__lab_day"
 
     def get_department(self, obj):
         if obj.role == "faculty" and hasattr(obj, "faculty_profile"):

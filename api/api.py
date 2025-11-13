@@ -248,6 +248,16 @@ def login(request: HttpRequest, data: UserLoginSchema):
     auth_login(request, user)
     request.session.set_expiry(86400)
 
+    # Warm instruments cache asynchronously to make UI loads instant
+    try:
+        from intruments.tasks import warm_instruments_cache
+        from api.tasks import warm_bills_handouts_cache
+        warm_instruments_cache.delay()
+        warm_bills_handouts_cache.delay()
+    except Exception:
+        # Best-effort; if Celery not running or import fails, ignore
+        pass
+
     return UserOutSchema.model_validate(user)
 
 @api.post("/logout")
@@ -1896,7 +1906,8 @@ def export_bills_xlsx(request, fy: Optional[str] = None, q: Optional[str] = None
         wb.remove(wb.worksheets[0])
 
     # Removed FY column (downloading for a specific/current year only)
-    headers = ["Name", "Bill No", "Amount", "Upload Date", "Comment", "View", "Download"]
+    # Per requirement: remove Download column from Excel; keep View link only
+    headers = ["Name", "Bill No", "Amount", "Upload Date", "Comment", "View"]
     header_font = Font(bold=True)
     header_cells = [WriteOnlyCell(ws, value=h) for h in headers]
     for c in header_cells:
@@ -1914,32 +1925,28 @@ def export_bills_xlsx(request, fy: Optional[str] = None, q: Optional[str] = None
         uploaded = localtime(b.uploaded_at).strftime("%Y-%m-%d")
         comment = (b.comment or "").replace("\r", " ").replace("\n", " ")
         view_url = f"{base}/api/bills/{b.id}/view"
-        dl_url = f"{base}/api/bills/{b.id}/download"
+        # Ensure hyperlinks render in Excel by using HYPERLINK formulas
+        def _esc(s: str) -> str:
+            try:
+                return s.replace('"', '""')
+            except Exception:
+                return s
 
-        name_cell = WriteOnlyCell(ws, value=name)
-        name_cell.hyperlink = view_url
-        name_cell.style = "Hyperlink"
+        # Create hyperlink-styled cells in blue for visibility
+        from openpyxl.styles import Font
+        name_cell = WriteOnlyCell(ws, value=f'=HYPERLINK("{_esc(view_url)}", "{_esc(str(name))}")')
+        name_cell.font = Font(color="0000FF", underline="single")
 
-        view_cell = WriteOnlyCell(ws, value="View")
-        view_cell.hyperlink = view_url
-        view_cell.style = "Hyperlink"
-
-        dl_cell = WriteOnlyCell(ws, value="Download")
-        dl_cell.hyperlink = dl_url
-        dl_cell.style = "Hyperlink"
-
-        # Optional: ensure long comments don't visually collide by allowing wrap (Excel may auto size row)
-        date_cell = WriteOnlyCell(ws, value=uploaded)
-        date_cell.alignment = Alignment(wrap_text=True)
+        view_cell = WriteOnlyCell(ws, value=f'=HYPERLINK("{_esc(view_url)}", "View")')
+        view_cell.font = Font(color="0000FF", underline="single")
 
         ws.append([
             name_cell,
             bill_no,
             amount,
-            date_cell,
+            uploaded,
             comment,
             view_cell,
-            dl_cell,
         ])
 
     # Set basic column widths
@@ -1949,7 +1956,6 @@ def export_bills_xlsx(request, fy: Optional[str] = None, q: Optional[str] = None
     ws.column_dimensions['D'].width = 30  # Upload Date (date only)
     ws.column_dimensions['E'].width = 60  # Comment (wider to avoid overlap)
     ws.column_dimensions['F'].width = 12  # View
-    ws.column_dimensions['G'].width = 14  # Download
 
     # Build response
     from django.utils import timezone as _tz
@@ -2592,9 +2598,14 @@ def export_handouts_xlsx(request, q: Optional[str] = None, lab_id: Optional[int]
         except Exception:
             pass
 
-    wb = Workbook(write_only=True)
+    # Use standard workbook so column widths/styles apply consistently (match Bills)
+    wb = Workbook()
     ws = wb.create_sheet("Handouts")
-    headers = ["Name", "Lab", "Upload Date", "Comment", "View", "Download"]
+    # Remove default sheet if present so the first visible sheet has data
+    if wb.worksheets and wb.worksheets[0].title == "Sheet":
+        wb.remove(wb.worksheets[0])
+    # Match Bills formatting: remove Download column, add View column only
+    headers = ["Name", "Lab", "Upload Date", "Comment", "View"]
     header_row = []
     for h in headers:
         cell = WriteOnlyCell(ws, value=h)
@@ -2613,30 +2624,40 @@ def export_handouts_xlsx(request, q: Optional[str] = None, lab_id: Optional[int]
             dt_str = str(h.uploaded_at)
         comment = (h.comment or "").replace("\r", " ").replace("\n", " ")
         view_url = f"{base}/api/handouts/{h.id}/view"
-        dl_url = f"{base}/api/handouts/{h.id}/download"
-        ws.append([name, lab_name, dt_str, comment, view_url, dl_url])
+
+        def _esc(s: str) -> str:
+            try:
+                return s.replace('"', '""')
+            except Exception:
+                return s
+
+        from openpyxl.cell.cell import WriteOnlyCell
+        from openpyxl.styles import Font, Alignment
+
+        name_cell = WriteOnlyCell(ws, value=f'=HYPERLINK("{_esc(view_url)}", "{_esc(str(name))}")')
+        name_cell.font = Font(color="0000FF", underline="single")
+
+        view_cell = WriteOnlyCell(ws, value=f'=HYPERLINK("{_esc(view_url)}", "View")')
+        view_cell.font = Font(color="0000FF", underline="single")
+
+        date_cell = WriteOnlyCell(ws, value=dt_str)
+        date_cell.alignment = Alignment(wrap_text=True)
+
+        ws.append([name_cell, lab_name, date_cell, comment, view_cell])
 
     # Best-effort column widths
-    try:
-        # write_only=True sheets don't have column_dimensions width effect until saved; this is a hint
-        ws.column_dimensions['A'].width = 40
-        ws.column_dimensions['B'].width = 24
-        ws.column_dimensions['C'].width = 18
-        ws.column_dimensions['D'].width = 60
-        ws.column_dimensions['E'].width = 40
-        ws.column_dimensions['F'].width = 40
-    except Exception:
-        pass
-
-    from io import BytesIO
-    bio = BytesIO()
-    wb.save(bio)
-    bio.seek(0)
+    # Match column sizing to Bills export
+    ws.column_dimensions['A'].width = 40  # Name
+    ws.column_dimensions['B'].width = 24  # Lab
+    ws.column_dimensions['C'].width = 30  # Upload Date
+    ws.column_dimensions['D'].width = 60  # Comment
+    ws.column_dimensions['E'].width = 12  # View
 
     from django.http import HttpResponse
-    response = HttpResponse(bio.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    response = HttpResponse(content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     response["Content-Disposition"] = 'attachment; filename="handouts_export.xlsx"'
     response["Cache-Control"] = "no-store"
+    wb.save(response)
     return response
 
 

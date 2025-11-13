@@ -192,7 +192,7 @@ class BulkApproveIn(Schema):
 
 class BulkRejectIn(Schema):
     ids: List[int]
-    remarks: str
+    remarks: Optional[str] = None
 
 
 class UserCreateIn(Schema):

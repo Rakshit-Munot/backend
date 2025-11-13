@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------
 IST = ZoneInfo("Asia/Kolkata")
+MESSAGES_CACHE_TIMEOUT = 300
+MESSAGES_CACHE_MAX = 200
 
 # Feature flags / toggles
 # Set to False to temporarily disable reminder emails without removing code paths.
@@ -342,6 +344,80 @@ def _cache_item_snapshot(snapshot: Dict[str, Any]):
 
 
 # ---------------------------
+# Cache warm-up on login
+# ---------------------------
+@shared_task(bind=True)
+def warm_instruments_cache(self) -> None:
+    """
+    Pre-warm Redis with instruments data to make first UI paint instant.
+
+    Warms:
+    - All items (category=all, sub=all)
+    - Items per category (sub=all)
+    - All categories
+    - Subcategories per category
+
+    Key formats match intruments.api helpers so existing cache reads hit.
+    """
+    try:
+        # Index keys (keep in sync with intruments.api)
+        ITEMS_INDEX_KEY = "instruments:items:keys"
+        CATEGORIES_INDEX_KEY = "instruments:categories:keys"
+        SUBCATS_INDEX_KEY = "instruments:subcategories:keys"
+
+        def add_to_index(index_key: str, key: str):
+            try:
+                keys = cache.get(index_key) or []
+                if key not in keys:
+                    keys.append(key)
+                    cache.set(index_key, keys, None)
+            except Exception:
+                pass
+
+        # Categories
+        categories_key = "instruments:categories:all"
+        categories = list(Category.objects.all().only("id", "name"))
+        cache.set(categories_key, categories, timeout=600)
+        add_to_index(CATEGORIES_INDEX_KEY, categories_key)
+
+        # Subcategories per category
+        for c in categories:
+            subcats_key = f"instruments:subcategories:category={c.id}"
+            subcats = list(SubCategory.objects.filter(category_id=c.id).only("id", "name", "category_id"))
+            cache.set(subcats_key, subcats, timeout=600)
+            add_to_index(SUBCATS_INDEX_KEY, subcats_key)
+
+        # All items
+        all_items_key = "instruments:items:category=all:sub=all"
+        all_items = list(Item.objects.select_related("category", "sub_category").all())
+        cache.set(all_items_key, all_items, timeout=300)
+        add_to_index(ITEMS_INDEX_KEY, all_items_key)
+
+        # Per-category items and per-subcategory items
+        for c in categories:
+            cat_items_qs = Item.objects.select_related("category", "sub_category").filter(category_id=c.id)
+            # Category only
+            cat_items_key = f"instruments:items:category={c.id}:sub=all"
+            cat_items = list(cat_items_qs)
+            cache.set(cat_items_key, cat_items, timeout=300)
+            add_to_index(ITEMS_INDEX_KEY, cat_items_key)
+
+            # Per subcategory under this category
+            subcats = list(SubCategory.objects.filter(category_id=c.id).only("id", "name", "category_id"))
+            for sub in subcats:
+                sub_items_key = f"instruments:items:category={c.id}:sub={sub.id}"
+                sub_items = list(cat_items_qs.filter(sub_category_id=sub.id))
+                cache.set(sub_items_key, sub_items, timeout=300)
+                add_to_index(ITEMS_INDEX_KEY, sub_items_key)
+
+        logger.info(
+            f"[Task {self.request.id}] Warmed instruments cache: cats={len(categories)}, items_all={len(all_items)}"
+        )
+    except Exception as e:
+        logger.exception(f"warm_instruments_cache failed: {e}")
+
+
+# ---------------------------
 # Async write-through tasks
 # ---------------------------
 @shared_task
@@ -429,9 +505,25 @@ def async_approve_issue(issue_id: int, no_of_days: int = 7, send_email: bool = T
                     # Auto-submit consumables upon approval
                     issue_request.submission_status = "submitted"
                     issue_request.submitted_at = issue_request.approved_at
-                    # Ensure remark reflects consumption for clarity in UI
-                    if not getattr(issue_request, "remarks", None):
-                        issue_request.remarks = "Consumed"
+                    # Ensure remarks include Consumed and submission time on next line if not already present
+                    try:
+                        submitted_txt = _fmt_ist(issue_request.submitted_at)
+                    except Exception:
+                        submitted_txt = str(issue_request.submitted_at) if issue_request.submitted_at else ""
+                    line1 = "Consumed"
+                    line2 = f"Submitted at {submitted_txt}" if submitted_txt else "Submitted"
+                    current = (getattr(issue_request, "remarks", "") or "").strip()
+                    if not current:
+                        issue_request.remarks = f"{line1}\n{line2}"
+                    else:
+                        # Append submission time if not present
+                        add_lines = []
+                        if "Consumed" not in current:
+                            add_lines.append(line1)
+                        if "Submitted at" not in current:
+                            add_lines.append(line2)
+                        if add_lines:
+                            issue_request.remarks = current + "\n" + "\n".join(add_lines)
                 else:
                     issue_request.submission_status = "pending"
             except Exception:
@@ -782,17 +874,26 @@ def send_issue_message_email(self, request_id: int, message_id: int):
             <p>Regards,<br/>Lab Team</p>
             """.format(item=escape(getattr(req.item, 'name', 'Instrument')), text=escape(msg.text or ""))
         )
-        # Disabled actual sending per policy
-        # send_mail(subject, body, getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"), [user_email], html_message=html_body)
+        # Send message notification email (guarded by DEBUG flag)
+        if getattr(settings, "DEBUG", True):
+            send_mail(
+                subject,
+                body,
+                getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
+                [user_email],
+                html_message=html_body,
+                fail_silently=False,
+            )
     except Exception:
-        logger.exception("send_issue_message_email failed")
+        # Avoid deep traceback recursion on some Python versions
+        logger.error("send_issue_message_email failed", exc_info=False)
 
 
 @shared_task(bind=True)
 def create_deadline_system_message(self, request_id: int):
     """Create a system message at the return deadline and optionally email the user."""
     try:
-        req = IssueRequest.objects.select_related("user", "item").get(id=request_id)
+        req = IssueRequest.objects.select_related("user", "item").only("id", "return_by", "submission_status").get(id=request_id)
         # Safety checks to avoid premature or duplicate messages due to timezone/clock skew
         now = timezone.now()
         rb = getattr(req, "return_by", None)
@@ -805,7 +906,8 @@ def create_deadline_system_message(self, request_id: int):
             try:
                 create_deadline_system_message.apply_async((req.id,), eta=rb)
             except Exception:
-                logger.exception("Reschedule deadline system message failed")
+                # Avoid recursive exception formatting
+                logger.error("Reschedule deadline system message failed", exc_info=False)
             return
 
         text = "Return deadline reached. Please return the instrument as soon as possible."
@@ -828,10 +930,33 @@ def create_deadline_system_message(self, request_id: int):
             )
         except Exception:
             pass
+        # Update Redis cache for messages
+        try:
+            ck = f"instruments:issue_messages:{req.id}"
+            entry = {
+                "id": msg.id,
+                "issue_request_id": req.id,
+                "msg_type": msg.msg_type,
+                "text": msg.text,
+                "created_at": msg.created_at,
+                "creator_id": msg.creator_id,
+                "sender_name": "System",
+            }
+            lst = cache.get(ck)
+            if isinstance(lst, list):
+                lst = [entry] + lst
+                if len(lst) > MESSAGES_CACHE_MAX:
+                    lst = lst[:MESSAGES_CACHE_MAX]
+                cache.set(ck, lst, timeout=MESSAGES_CACHE_TIMEOUT)
+            else:
+                cache.set(ck, [entry], timeout=MESSAGES_CACHE_TIMEOUT)
+        except Exception:
+            pass
         # Optionally email
         try:
             send_issue_message_email.delay(req.id, msg.id)
         except Exception:
             pass
     except Exception:
-        logger.exception("create_deadline_system_message failed")
+        # Avoid recursive exception formatting on traceback
+        logger.error("create_deadline_system_message failed", exc_info=False)
